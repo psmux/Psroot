@@ -1,0 +1,35 @@
+# Build output
+/target/
+
+# Test artifacts
+test-*
+test_*
+tmp*
+*.tmp
+
+# Large files
+*.exe
+*.dll
+*.pdb
+*.lib
+*.obj
+*.o
+*.a
+*.so
+*.dylib
+
+# IDE / editor
+.vs/
+.vscode/
+*.swp
+*.swo
+*~
+.idea/
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Cargo lock is committed for binaries (keep it)
+# Cargo.lock

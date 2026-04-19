@@ -1,0 +1,9 @@
+[package]
+name = "psroot-namespace"
+version.workspace = true
+edition.workspace = true
+description = "NT Object Namespace builder for Server Silos"
+
+[dependencies]
+psroot-types = { path = "../psroot-types" }
+tracing = { workspace = true }

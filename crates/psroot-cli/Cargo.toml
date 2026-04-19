@@ -1,0 +1,21 @@
+[package]
+name = "psroot-cli"
+version.workspace = true
+edition.workspace = true
+description = "Psroot CLI — Docker-style container management for Windows"
+
+[[bin]]
+name = "psroot"
+path = "src/main.rs"
+
+[dependencies]
+psroot-types = { path = "../psroot-types" }
+psroot-job = { path = "../psroot-job" }
+psroot-silo = { path = "../psroot-silo" }
+psroot-bindlink = { path = "../psroot-bindlink" }
+psroot-container = { path = "../psroot-container" }
+psroot-namespace = { path = "../psroot-namespace" }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }

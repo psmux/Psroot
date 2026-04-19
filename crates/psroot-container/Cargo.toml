@@ -1,0 +1,17 @@
+[package]
+name = "psroot-container"
+version.workspace = true
+edition.workspace = true
+description = "Container lifecycle orchestration — create/start/exec/stop/remove"
+
+[dependencies]
+psroot-types = { path = "../psroot-types" }
+psroot-job = { path = "../psroot-job" }
+psroot-silo = { path = "../psroot-silo" }
+psroot-bindlink = { path = "../psroot-bindlink" }
+psroot-namespace = { path = "../psroot-namespace" }
+windows-sys = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
