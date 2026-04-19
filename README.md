@@ -15,7 +15,8 @@
   <a href="#commands">Commands</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#isolation-tiers">Isolation Tiers</a> •
-  <a href="#building-from-source">Building</a>
+  <a href="#building-from-source">Building</a> •
+  <a href="#documentation">Docs</a>
 </p>
 
 ---
@@ -190,6 +191,8 @@ Runs a comprehensive test suite covering:
 | `psroot stats <id>` | Show resource usage |
 | `psroot test [category]` | Run isolation tests |
 
+See the full [CLI Reference](docs/cli-reference.md) for all flags and options.
+
 ---
 
 ## Isolation Tiers
@@ -278,6 +281,20 @@ The binary lands at `target\release\psroot.exe` (~2 MB with LTO).
 
 ---
 
+## Documentation
+
+| Guide | What you'll learn |
+|---|---|
+| [Installation](docs/installation.md) | Download, build from source, system requirements |
+| [Quick Start](docs/quick-start.md) | First container in 10 seconds, tools, networking |
+| [Container Lifecycle](docs/container-lifecycle.md) | Create, start, exec, stop, remove — Docker-style workflow |
+| [Isolation Guide](docs/isolation.md) | How AppContainer works, what's blocked, isolation tiers explained |
+| [Network & Tools](docs/network-and-tools.md) | Network modes, Node.js/Rust/winget provisioning, volumes |
+| [Resource Limits](docs/resource-limits.md) | Memory, CPU, process limits and monitoring |
+| [CLI Reference](docs/cli-reference.md) | Every command and flag |
+
+---
+
 ## FAQ
 
 **Q: Is this as secure as Docker?**
@@ -304,9 +321,8 @@ MIT
 ---
 
 <p align="center">
-  <strong>Built by <a href="https://github.com/psmux">psmux</a></strong> — the team behind <a href="https://github.com/psmux/psmux">PsMux</a> and <a href="https://github.com/psmux/pstop">pstop</a>
+  <strong>Built by <a href="https://github.com/psmux">psmux</a></strong>
 </p>
-# Psroot
 
 Docker-style containers for Windows, without Docker, without Hyper-V, without VT.
 
