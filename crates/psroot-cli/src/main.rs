@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use psroot_container::{Capabilities, Container, IsolationLevel};
-use psroot_types::config::{ContainerConfig, NetworkAccess, ResourceLimits, SecurityProfile, VolumeMount};
+use psroot_types::config::{ContainerConfig, NetworkAccess, PortMapping, ResourceLimits, SecurityProfile, VolumeMount};
 use psroot_types::state::ContainerState;
 use tracing_subscriber::EnvFilter;
 
@@ -73,6 +73,11 @@ enum Commands {
         /// Network access: none, outbound, full
         #[arg(long, default_value = "none")]
         network: String,
+
+        /// Publish a container port (Docker style).
+        /// Formats: PORT | HOST:CONTAINER | BIND:HOST:CONTAINER
+        #[arg(short = 'p', long = "publish")]
+        publish: Vec<String>,
     },
 
     /// Start a created container
@@ -130,6 +135,11 @@ enum Commands {
         /// Network access: none, outbound, full
         #[arg(long, default_value = "none")]
         network: String,
+
+        /// Publish a container port (Docker style).
+        /// Formats: PORT | HOST:CONTAINER | BIND:HOST:CONTAINER
+        #[arg(short = 'p', long = "publish")]
+        publish: Vec<String>,
     },
 
     /// Execute a command in a running container
@@ -161,6 +171,11 @@ enum Commands {
         /// Max processes
         #[arg(long, default_value = "100")]
         max_procs: u32,
+
+        /// Publish a container port (Docker style).
+        /// Formats: PORT | HOST:CONTAINER | BIND:HOST:CONTAINER
+        #[arg(short = 'p', long = "publish")]
+        publish: Vec<String>,
     },
 
     /// Stop a running container
@@ -222,14 +237,14 @@ fn run(cmd: Commands) -> psroot_types::error::Result<()> {
     match cmd {
         Commands::Info => cmd_info(),
         Commands::Create {
-            name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network,
-        } => cmd_create(name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network),
+            name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network, publish,
+        } => cmd_create(name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network, publish),
         Commands::Start { id } => cmd_start(&id),
         Commands::Run {
-            name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network,
-        } => cmd_run(name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network),
+            name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network, publish,
+        } => cmd_run(name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network, publish),
         Commands::Exec { id, command } => cmd_exec(&id, &command),
-        Commands::Shell { tool, network, memory, cpu, max_procs } => cmd_shell(tool, network, memory, cpu, max_procs),
+        Commands::Shell { tool, network, memory, cpu, max_procs, publish } => cmd_shell(tool, network, memory, cpu, max_procs, publish),
         Commands::Stop { id } => cmd_stop(&id),
         Commands::Rm { id, force } => cmd_rm(&id, force),
         Commands::Ls { status } => cmd_ls(status),
@@ -268,8 +283,9 @@ fn cmd_create(
     workdir: String,
     tools: Vec<String>,
     network: String,
+    publish: Vec<String>,
 ) -> psroot_types::error::Result<()> {
-    let config = build_config(name, rootfs, vec![command], memory, cpu, max_procs, silo, volumes, envs, workdir, tools, network)?;
+    let config = build_config(name, rootfs, vec![command], memory, cpu, max_procs, silo, volumes, envs, workdir, tools, network, publish)?;
     let container = Container::create(config)?;
     println!("{}", container.id());
     Ok(())
@@ -295,13 +311,22 @@ fn cmd_run(
     workdir: String,
     tools: Vec<String>,
     network: String,
+    publish: Vec<String>,
 ) -> psroot_types::error::Result<()> {
     let cmd = if command.is_empty() { vec!["cmd.exe".into()] } else { command };
-    let config = build_config(name, rootfs, cmd, memory, cpu, max_procs, silo, volumes, envs, workdir, tools, network)?;
+    let config = build_config(name, rootfs, cmd, memory, cpu, max_procs, silo, volumes, envs, workdir, tools, network, publish)?;
     let mut container = Container::create(config)?;
     println!("Created: {}", container.id());
     container.start()?;
     println!("Running: {}", container.id());
+    for m in &container.config().ports {
+        if let Some(eph) = m.ephemeral_port {
+            println!(
+                "  Port: {}:{} -> 127.0.0.1:{} (container port {})",
+                m.host_bind, m.host_port, eph, m.container_port
+            );
+        }
+    }
     Ok(())
 }
 
@@ -318,6 +343,7 @@ fn cmd_shell(
     memory: String,
     cpu: u32,
     max_procs: u32,
+    publish: Vec<String>,
 ) -> psroot_types::error::Result<()> {
     let network_access = match network.to_lowercase().as_str() {
         "none" | "" => NetworkAccess::None,
@@ -330,10 +356,13 @@ fn cmd_shell(
 
     let memory_bytes = parse_memory(&memory)?;
 
+    let ports = parse_ports(&publish)?;
+
     let config = ContainerConfig {
         command: vec!["cmd.exe".into()],
         tools,
         network: network_access,
+        ports,
         resources: ResourceLimits {
             memory: memory_bytes,
             cpu_rate: cpu,
@@ -388,21 +417,30 @@ fn cmd_rm(id: &str, force: bool) -> psroot_types::error::Result<()> {
 }
 
 fn cmd_ls(status_filter: Option<String>) -> psroot_types::error::Result<()> {
-    let containers = Container::list()?;
+    let containers = Container::list_with_ports()?;
     if containers.is_empty() {
         println!("No containers");
         return Ok(());
     }
 
-    println!("{:<24} {:<10} {}", "ID", "STATUS", "CREATED");
-    println!("{}", "─".repeat(50));
-    for (id, state, created) in &containers {
+    println!("{:<24} {:<10} {:<20} {}", "ID", "STATUS", "CREATED", "PORTS");
+    println!("{}", "─".repeat(80));
+    for (id, state, created, ports) in &containers {
         if let Some(ref filter) = status_filter {
             if state.to_string() != *filter {
                 continue;
             }
         }
-        println!("{:<24} {:<10} {}", id, state, created);
+        let ports_str = if ports.is_empty() {
+            "—".to_string()
+        } else {
+            ports
+                .iter()
+                .map(|m| format!("{}:{}->{}", m.host_bind, m.host_port, m.container_port))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!("{:<24} {:<10} {:<20} {}", id, state, created, ports_str);
     }
     Ok(())
 }
@@ -2036,6 +2074,7 @@ fn default_config() -> ContainerConfig {
         tools: Vec::new(),
         security_profile: SecurityProfile::Default,
         network: NetworkAccess::None,
+        ports: Vec::new(),
     }
 }
 
@@ -2052,6 +2091,7 @@ fn build_config(
     workdir: String,
     tools: Vec<String>,
     network: String,
+    publish: Vec<String>,
 ) -> psroot_types::error::Result<ContainerConfig> {
     let memory_bytes = parse_memory(&memory)?;
 
@@ -2081,6 +2121,8 @@ fn build_config(
         )),
     };
 
+    let ports = parse_ports(&publish)?;
+
     Ok(ContainerConfig {
         name,
         rootfs_path: rootfs,
@@ -2099,7 +2141,15 @@ fn build_config(
         tools,
         security_profile: SecurityProfile::Default,
         network: network_access,
+        ports,
     })
+}
+
+fn parse_ports(publish: &[String]) -> psroot_types::error::Result<Vec<PortMapping>> {
+    publish
+        .iter()
+        .map(|s| psroot_portmap::parse_publish(s).map_err(psroot_types::error::PsrootError::Other))
+        .collect()
 }
 
 fn parse_memory(s: &str) -> psroot_types::error::Result<u64> {

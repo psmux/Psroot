@@ -40,7 +40,83 @@ Full network access including **listening on ports** and **loopback** (localhost
 
 Uses `internetClient` + `internetClientServer` capabilities, plus loopback exemption.
 
-> **Note:** The container shares the host's network stack and IP address. There's no network namespace isolation. If the container listens on port 3000, that port is occupied on the host too.
+> **Note:** The container shares the host's network stack and IP address. There's no network namespace isolation — `bind(3000)` from inside is a `bind(3000)` on the host. Use **port publishing** (below) to map container ports to different, non-colliding host ports.
+
+## Port Publishing
+
+Psroot supports Docker-style `-p` / `--publish` to expose container services
+without hard-coded host-port conflicts.
+
+```powershell
+# Run a Node dev server that thinks it listens on 3000,
+# reachable on the host at http://127.0.0.1:8080
+psroot run --network full -p 8080:3000 --tool node -- node server.js
+
+# Two containers both "listening on 3000" — no collision
+psroot run --network full -p 8080:3000 --tool node -- node app.js
+psroot run --network full -p 8081:3000 --tool node -- node app.js
+
+# Expose on all interfaces
+psroot run --network full -p 0.0.0.0:8080:3000 -- node app.js
+
+# Multiple ports
+psroot run --network full -p 8080:3000 -p 9090:4000 -- node app.js
+```
+
+### How it works
+
+Because Windows has no user-mode network namespaces without Hyper-V, psroot
+cannot truly give the container its own TCP port space. Instead, each `-p`
+mapping:
+
+1. **Allocates a random ephemeral loopback port** on `127.0.0.1` (e.g.
+   `54321`) at container start.
+2. **Injects it as environment variables** into the container:
+   - `PORT=54321` (set to the first mapping — picked up automatically by
+     Next.js, Express, FastAPI, Flask, Rails, etc.)
+   - `PSROOT_PORT_3000=54321` (per-mapping, for programs that need to know
+     their public-facing logical port).
+   - `HOST=127.0.0.1`.
+3. **Starts a host-side TCP reverse proxy** on `host_bind:host_port`
+   (default bind `127.0.0.1`) that forwards every connection to
+   `127.0.0.1:54321`.
+4. **Tears the proxy down** cleanly when the container stops.
+
+End result: two containers can each say "I serve on port 3000" and the user
+picks distinct `-p` host ports for them. The ephemeral ports are not
+chosen by the user and don't conflict with well-known developer ports.
+
+### Publish spec formats
+
+| Form                       | Meaning                                      |
+| -------------------------- | -------------------------------------------- |
+| `PORT`                     | bind `127.0.0.1:PORT`, logical container=PORT|
+| `HOST:CONTAINER`           | bind `127.0.0.1:HOST`, logical=CONTAINER     |
+| `BIND:HOST:CONTAINER`      | bind `BIND:HOST`, logical=CONTAINER          |
+
+### Limitations
+
+- **Requires `--network full`.** Outbound-only and none-networking containers
+  cannot accept inbound connections.
+- **The program must honor `$PORT`** (or read `PSROOT_PORT_*`). Programs
+  that hard-code `listen(3000)` will try to bind port 3000 on the host and
+  conflict with any other process already using it. A future Detours-based
+  `bind()` interception shim will transparently rewrite these; until then
+  prefer frameworks that respect `$PORT`.
+- **TCP only.** UDP, ICMP, SCTP, and protocol-aware features (PROXY
+  protocol, TLS SNI) are not implemented.
+- **Small TOCTOU window.** The ephemeral port is reserved by briefly
+  binding `127.0.0.1:0` at start — another process could snatch it before
+  the container rebinds. In practice the window is microseconds.
+
+### Inspecting mappings
+
+```powershell
+psroot ls
+# ID                       STATUS     CREATED              PORTS
+# ──────────────────────────────────────────────────────────────────
+# psroot-a1b2c3d4          running    2026-04-21 10:15:03  127.0.0.1:8080->3000
+```
 
 ## Tool Provisioning
 

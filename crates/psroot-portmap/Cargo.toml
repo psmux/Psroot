@@ -1,0 +1,11 @@
+[package]
+name = "psroot-portmap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+psroot-types = { path = "../psroot-types" }
+tracing.workspace = true
+serde.workspace = true

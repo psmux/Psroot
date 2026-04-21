@@ -92,6 +92,11 @@ pub struct ContainerConfig {
     /// Network access level for AppContainer processes.
     #[serde(default)]
     pub network: NetworkAccess,
+    /// Published port mappings (Docker `-p` style). Each entry reserves a
+    /// random ephemeral loopback port inside the container and exposes it
+    /// via a host-side TCP reverse proxy on `host_bind:host_port`.
+    #[serde(default)]
+    pub ports: Vec<PortMapping>,
 }
 
 fn default_command() -> Vec<String> {
@@ -131,4 +136,38 @@ pub enum NetworkAccess {
     /// Allows: dev servers (vite, webpack-dev-server), API servers.
     /// Host can reach container services on localhost:<port>.
     Full,
+}
+
+/// A published port mapping (Docker `-p` style).
+///
+/// Because Windows has no user-mode network namespaces, psroot cannot give a
+/// container its own TCP port space. Instead, each mapping allocates a
+/// random ephemeral port on `127.0.0.1` and injects it into the container as
+/// `PORT` / `PSROOT_PORT_<container_port>` env vars. A host-side TCP proxy
+/// then forwards `host_bind:host_port` to `127.0.0.1:ephemeral_port`.
+///
+/// End result: two containers can both declare `container_port = 3000` and
+/// each gets its own mapped host port — no `EADDRINUSE`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortMapping {
+    /// Interface the host-side proxy binds to. Defaults to `127.0.0.1`;
+    /// set to `0.0.0.0` to expose on every interface.
+    #[serde(default = "default_host_bind")]
+    pub host_bind: String,
+    /// Port the host-side proxy listens on (what users connect to).
+    pub host_port: u16,
+    /// Logical container port. Used to name the env var
+    /// (`PSROOT_PORT_<container_port>`) and for display purposes.
+    pub container_port: u16,
+    /// Actual loopback port the container process binds to. Filled in at
+    /// runtime when the container starts.
+    #[serde(default)]
+    pub ephemeral_port: Option<u16>,
+    /// Optional human-readable label.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+fn default_host_bind() -> String {
+    "127.0.0.1".into()
 }

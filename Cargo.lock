@@ -320,6 +320,7 @@ dependencies = [
  "psroot-container",
  "psroot-job",
  "psroot-namespace",
+ "psroot-portmap",
  "psroot-silo",
  "psroot-types",
  "serde_json",
@@ -334,6 +335,7 @@ dependencies = [
  "psroot-bindlink",
  "psroot-job",
  "psroot-namespace",
+ "psroot-portmap",
  "psroot-silo",
  "psroot-types",
  "serde",
@@ -357,6 +359,15 @@ name = "psroot-namespace"
 version = "0.1.0"
 dependencies = [
  "psroot-types",
+ "tracing",
+]
+
+[[package]]
+name = "psroot-portmap"
+version = "0.1.0"
+dependencies = [
+ "psroot-types",
+ "serde",
  "tracing",
 ]
 

@@ -10,6 +10,7 @@ psroot-job = { path = "../psroot-job" }
 psroot-silo = { path = "../psroot-silo" }
 psroot-bindlink = { path = "../psroot-bindlink" }
 psroot-namespace = { path = "../psroot-namespace" }
+psroot-portmap = { path = "../psroot-portmap" }
 windows-sys = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

@@ -6,8 +6,9 @@ use crate::detect::Capabilities;
 use crate::rootfs;
 use psroot_bindlink::{BindFilter, BindLinkOptions};
 use psroot_job::JobObject;
+use psroot_portmap::PortMapper;
 use psroot_silo::Silo;
-use psroot_types::config::ContainerConfig;
+use psroot_types::config::{ContainerConfig, NetworkAccess, PortMapping};
 use psroot_types::error::{PsrootError, Result};
 use psroot_types::state::ContainerState;
 use psroot_types::stats::ContainerStats;
@@ -24,6 +25,8 @@ struct StateFile {
     created: String,
     pid: Option<u32>,
     silo_id: Option<u32>,
+    #[serde(default)]
+    ports: Vec<PortMapping>,
 }
 
 /// The data root for all Psroot containers.
@@ -41,6 +44,7 @@ struct Runtime {
     job: Option<JobObject>,
     silo: Option<Silo>,
     bind_filter: Option<BindFilter>,
+    port_mapper: Option<PortMapper>,
 }
 
 /// A Psroot container.
@@ -85,6 +89,7 @@ impl Container {
             created: created.clone(),
             pid: None,
             silo_id: None,
+            ports: config.ports.clone(),
         };
         fs::write(dir.join("state.json"), serde_json::to_string_pretty(&state_file)?)?;
 
@@ -99,8 +104,7 @@ impl Container {
             runtime: Runtime {
                 job: None,
                 silo: None,
-                bind_filter: None,
-            },
+                bind_filter: None,                port_mapper: None,            },
         })
     }
 
@@ -117,6 +121,45 @@ impl Container {
         }
 
         let caps = Capabilities::detect();
+
+        // ── Port mappings: allocate ephemeral ports + start host proxies ──
+        //
+        // We do this BEFORE spawning the container process so the injected
+        // `PORT` / `PSROOT_PORT_*` env vars reflect the real ephemeral ports.
+        // Proxies are started first too, so the accept loops are ready by
+        // the time the container's server issues its `listen()`.
+        if !self.config.ports.is_empty() {
+            if self.config.network != NetworkAccess::Full {
+                tracing::warn!(
+                    id = %self.id,
+                    "Port mappings require --network full; publishing will not work with current network mode"
+                );
+            }
+            for m in self.config.ports.iter_mut() {
+                if m.ephemeral_port.is_none() {
+                    let eph = PortMapper::allocate_ephemeral().map_err(|e| {
+                        PsrootError::Other(format!("allocate ephemeral port: {}", e))
+                    })?;
+                    m.ephemeral_port = Some(eph);
+                }
+            }
+
+            let mapper = PortMapper::new();
+            for m in &self.config.ports {
+                mapper.add(m.clone()).map_err(|e| {
+                    PsrootError::Other(format!(
+                        "publish {}:{} -> {}: {}",
+                        m.host_bind, m.host_port, m.container_port, e
+                    ))
+                })?;
+            }
+            self.runtime.port_mapper = Some(mapper);
+
+            // Inject PORT / PSROOT_PORT_<container_port> env vars.
+            for (k, v) in psroot_portmap::env_for_mappings(&self.config.ports) {
+                self.config.env.insert(k, v);
+            }
+        }
 
         if self.config.silo && caps.server_silos {
             // ── Full silo mode ──
@@ -248,6 +291,10 @@ impl Container {
         if let Some(mut bf) = self.runtime.bind_filter.take() {
             bf.remove_all();
         }
+        if let Some(mapper) = self.runtime.port_mapper.take() {
+            mapper.shutdown();
+            drop(mapper);
+        }
 
         self.state = ContainerState::Stopped;
         self.write_state()?;
@@ -318,6 +365,7 @@ impl Container {
                 job: None,
                 silo: None,
                 bind_filter: None,
+                port_mapper: None,
             },
         })
     }
@@ -340,6 +388,30 @@ impl Container {
             if let Ok(content) = fs::read_to_string(&state_path) {
                 if let Ok(state) = serde_json::from_str::<StateFile>(&content) {
                     result.push((id, state.status, state.created));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// List all containers with their persisted port mappings (for `ls`).
+    pub fn list_with_ports() -> Result<Vec<(String, ContainerState, String, Vec<PortMapping>)>> {
+        let containers_dir = psroot_root().join("containers");
+        if !containers_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut result = Vec::new();
+        for entry in fs::read_dir(&containers_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            let state_path = entry.path().join("state.json");
+            if let Ok(content) = fs::read_to_string(&state_path) {
+                if let Ok(state) = serde_json::from_str::<StateFile>(&content) {
+                    result.push((id, state.status, state.created, state.ports));
                 }
             }
         }
@@ -388,6 +460,7 @@ impl Container {
             created: self.created.clone(),
             pid: self.runtime.silo.as_ref().and_then(|s| s.init_pid()),
             silo_id: self.runtime.silo.as_ref().map(|s| s.silo_id()),
+            ports: self.config.ports.clone(),
         };
         fs::write(
             self.dir.join("state.json"),

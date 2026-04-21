@@ -15,6 +15,7 @@ psroot-silo = { path = "../psroot-silo" }
 psroot-bindlink = { path = "../psroot-bindlink" }
 psroot-container = { path = "../psroot-container" }
 psroot-namespace = { path = "../psroot-namespace" }
+psroot-portmap = { path = "../psroot-portmap" }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
