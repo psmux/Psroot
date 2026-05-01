@@ -1,0 +1,19 @@
+[package]
+name = "psroot-netstack-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-side netstack daemon: terminates per-container socket syscalls and NATs them to real host sockets"
+
+[dependencies]
+psroot-netstack-proto = { path = "../psroot-netstack-proto" }
+psroot-netstack-ipc = { path = "../psroot-netstack-ipc" }
+psroot-types = { path = "../psroot-types" }
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Used only to disable `SIO_UDP_CONNRESET` on our backend UDP sockets
+# so spurious ICMP "port unreachable" from loopback peers does not get
+# turned into WSAECONNRESET on subsequent `recvfrom` calls.
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }

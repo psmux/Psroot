@@ -14,6 +14,9 @@ psroot shell --network none
 
 The container has **no network access** at all. DNS, HTTP, TCP — all blocked. This is the safest option for running untrusted code.
 
+> See [Networking Inside Sandboxes](./sandbox-networking.md) for ping, DNS,
+> SSH, and IP discovery tools that work inside AppContainer.
+
 ### Outbound
 
 ```powershell

@@ -150,7 +150,7 @@ enum Commands {
         command: String,
     },
 
-    /// Interactive shell: create container + drop into cmd.exe
+    /// Interactive shell: create container + drop into the requested shell.
     Shell {
         /// Tools to install (node, rust-bin, winget)
         #[arg(short, long)]
@@ -176,6 +176,131 @@ enum Commands {
         /// Formats: PORT | HOST:CONTAINER | BIND:HOST:CONTAINER
         #[arg(short = 'p', long = "publish")]
         publish: Vec<String>,
+
+        /// Catalog shell name: cmd, pwsh, powershell, ... (default: cmd).
+        /// Mutually exclusive with --shell-binary.
+        #[arg(long = "shell")]
+        shell: Option<String>,
+
+        /// Version constraint, e.g. ">=7.4" or "~7.5".
+        #[arg(long = "shell-version")]
+        shell_version: Option<String>,
+
+        /// Extra arg appended to the shell entry (repeatable).
+        #[arg(long = "shell-arg")]
+        shell_arg: Vec<String>,
+
+        /// Override env var inside sandbox: KEY=VALUE (repeatable).
+        #[arg(long = "shell-env")]
+        shell_env: Vec<String>,
+
+        /// Print the resolved LaunchPlan and exit (do not spawn).
+        #[arg(long = "explain")]
+        explain: bool,
+
+        /// Refuse to stage missing shells (use cache only).
+        #[arg(long = "no-stage")]
+        no_stage: bool,
+
+        /// Legacy: shell binary path (bypasses resolver). Mutually exclusive with --shell.
+        #[arg(long = "shell-binary")]
+        shell_binary: Option<String>,
+
+        /// Bind-mount a host directory into the container (Docker `-v` style).
+        /// Formats:
+        ///   HOST_PATH:CONTAINER_PATH           (e.g. C:\Users\gj\proj:C:\mnt\proj)
+        ///   HOST_PATH:LETTER:                  (e.g. C:\Users\gj\proj:M: mounts as M:)
+        /// Path-target mounts create a junction inside the rootfs resolved via
+        /// volume-GUID so device-map remapping doesn't break them.
+        /// Drive-letter-target mounts are wired via the private DOS device map.
+        #[arg(short = 'v', long = "bind")]
+        bind: Vec<String>,
+
+        /// Share a host system directory into the container (passthrough,
+        /// implemented as a volume-GUID junction in the rootfs). Repeatable.
+        /// Recognised values: `windows`, `programfiles`, `programfilesx86`,
+        /// `programdata`, `windowsapps`. `--share windows` is the
+        /// recommended way to fix .NET HTTPS / SslStream and to expose the
+        /// full set of Windows DLLs without a fragile per-binary mirror.
+        /// `--tool winget` auto-implies all four required shares.
+        #[arg(long = "share")]
+        share: Vec<String>,
+
+        /// Isolation mode: auto, standard (AppContainer only), full (Server Silo).
+        /// Default: auto (uses Silo if admin, otherwise AppContainer).
+        #[arg(long = "isolate", default_value = "auto")]
+        isolate: String,
+    },
+
+    /// Pre-stage a host shell into the per-user cache.
+    Stage {
+        /// Shell name from the catalog: pwsh, powershell, cmd, ...
+        shell: String,
+
+        /// Version constraint, e.g. ">=7.4".
+        #[arg(long = "shell-version")]
+        shell_version: Option<String>,
+
+        /// Re-stage even if cache is already populated.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Run ANY app inside a sandboxed container with GUI isolation.
+    ///
+    /// Stages the app (and its entire directory) into a container rootfs
+    /// via hardlinks, then launches it on an invisible isolated desktop.
+    /// No catalog file needed — works with any .exe.
+    ///
+    /// Examples:
+    ///   psroot gui "C:\Program Files\Google\Chrome\Application\chrome.exe"
+    ///   psroot gui "C:\Program Files\Mozilla Firefox\firefox.exe" -- https://example.com
+    ///   psroot gui "C:\portable\app.exe" --timeout 60
+    Gui {
+        /// Path to the executable to run inside the container.
+        exe: String,
+
+        /// Override the app root directory (default: exe's parent folder).
+        /// Use this when the exe is in a subfolder like `bin\`.
+        #[arg(long)]
+        app_root: Option<String>,
+
+        /// Extra arguments to pass to the app.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+
+        /// Timeout in seconds (0 = wait forever).
+        #[arg(long, default_value = "0")]
+        timeout: u64,
+
+        /// Extra host directory to stage: HOST_PATH:MOUNT_NAME
+        #[arg(long = "extra-dir")]
+        extra_dir: Vec<String>,
+
+        /// Glob patterns to exclude from staging (repeatable).
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+
+        /// Disable network access for the app.
+        #[arg(long)]
+        no_network: bool,
+    },
+
+    /// List shells the resolver knows about.
+    ShellList,
+
+    /// Show what the resolver would do for a shell on this host.
+    ShellInfo {
+        /// Shell name from the catalog.
+        shell: String,
+    },
+
+    /// One-time admin setup: grant ALL APPLICATION PACKAGES the minimum
+    /// ACEs needed for AppContainer shells (volume root + cache root).
+    Setup {
+        /// Show what would change without modifying anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Stop a running container
@@ -244,7 +369,20 @@ fn run(cmd: Commands) -> psroot_types::error::Result<()> {
             name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network, publish,
         } => cmd_run(name, rootfs, command, memory, cpu, max_procs, silo, volume, env, workdir, tool, network, publish),
         Commands::Exec { id, command } => cmd_exec(&id, &command),
-        Commands::Shell { tool, network, memory, cpu, max_procs, publish } => cmd_shell(tool, network, memory, cpu, max_procs, publish),
+        Commands::Shell {
+            tool, network, memory, cpu, max_procs, publish,
+            shell, shell_version, shell_arg, shell_env, explain, no_stage, shell_binary, bind, share, isolate,
+        } => cmd_shell(
+            tool, network, memory, cpu, max_procs, publish,
+            shell, shell_version, shell_arg, shell_env, explain, no_stage, shell_binary, bind, share, isolate,
+        ),
+        Commands::Stage { shell, shell_version, force } => cmd_stage(&shell, shell_version, force),
+        Commands::Gui { exe, app_root, args, timeout, extra_dir, exclude, no_network } => {
+            cmd_gui(&exe, app_root, args, timeout, extra_dir, exclude, no_network)
+        }
+        Commands::ShellList => cmd_shell_list(),
+        Commands::ShellInfo { shell } => cmd_shell_info(&shell),
+        Commands::Setup { dry_run } => cmd_setup(dry_run),
         Commands::Stop { id } => cmd_stop(&id),
         Commands::Rm { id, force } => cmd_rm(&id, force),
         Commands::Ls { status } => cmd_ls(status),
@@ -344,25 +482,158 @@ fn cmd_shell(
     cpu: u32,
     max_procs: u32,
     publish: Vec<String>,
+    shell: Option<String>,
+    shell_version: Option<String>,
+    shell_arg: Vec<String>,
+    shell_env: Vec<String>,
+    explain: bool,
+    no_stage: bool,
+    shell_binary: Option<String>,
+    bind: Vec<String>,
+    share: Vec<String>,
+    isolate: String,
 ) -> psroot_types::error::Result<()> {
+    use psroot_container::shell_resolver::{
+        NetworkAccess as RNet, ResolveContext, Resolver, ShellRequest, VersionReq,
+    };
+
+    if shell.is_some() && shell_binary.is_some() {
+        return Err(psroot_types::error::PsrootError::Other(
+            "--shell and --shell-binary are mutually exclusive".into(),
+        ));
+    }
+
     let network_access = match network.to_lowercase().as_str() {
         "none" | "" => NetworkAccess::None,
         "outbound" | "out" => NetworkAccess::Outbound,
         "full" | "all" => NetworkAccess::Full,
+        "netstack" | "ns" => NetworkAccess::Netstack,
         other => return Err(psroot_types::error::PsrootError::Other(
-            format!("Invalid network mode '{}': use none, outbound, or full", other)
+            format!("Invalid network mode '{}': use none, outbound, full, or netstack", other)
         )),
     };
-
     let memory_bytes = parse_memory(&memory)?;
-
     let ports = parse_ports(&publish)?;
 
+    // Legacy path: --shell-binary still works exactly as before.
+    if let Some(legacy) = shell_binary {
+        let config = ContainerConfig {
+            command: vec![legacy.clone()],
+            tools,
+            network: network_access,
+            ports,
+            resources: ResourceLimits {
+                memory: memory_bytes,
+                cpu_rate: cpu,
+                max_processes: max_procs,
+                ..Default::default()
+            },
+            ..default_config()
+        };
+        let container = Container::create(config)?;
+        let id = container.id().to_string();
+        print_shell_banner(&id, container.config(), &network);
+        let exit_code = container.shell(&legacy)?;
+        eprintln!("\nShell exited (code {}). Cleaning up...", exit_code);
+        container.remove(false)?;
+        eprintln!("Container {} removed.", id);
+        return Ok(());
+    }
+
+    let shell_name = shell.unwrap_or_else(|| "cmd".to_string());
+
+    // Build resolver request.
+    let mut req = ShellRequest::new(shell_name.clone());
+    req.args = shell_arg;
+    req.env = shell_env
+        .into_iter()
+        .filter_map(|e| {
+            let mut it = e.splitn(2, '=');
+            match (it.next(), it.next()) {
+                (Some(k), Some(v)) => Some((k.to_string(), v.to_string())),
+                _ => None,
+            }
+        })
+        .collect();
+    if let Some(vs) = shell_version {
+        req.version = VersionReq::parse(&vs);
+        if req.version.is_none() {
+            return Err(psroot_types::error::PsrootError::Other(format!(
+                "Invalid --shell-version '{}': use e.g. '>=7.4' or '~7.5'",
+                vs
+            )));
+        }
+    }
+
+    // Map network mode for resolver.
+    let r_net = match network_access {
+        NetworkAccess::None => RNet::None,
+        NetworkAccess::Outbound => RNet::Outbound,
+        NetworkAccess::Full => RNet::Full,
+        NetworkAccess::Netstack => RNet::Netstack,
+    };
+
+    // Determine cache root.
+    let cache_root = cache_root_dir();
+    std::fs::create_dir_all(&cache_root).ok();
+
+    // Pre-flight: AppContainer needs ALL APPLICATION PACKAGES on C:\ root
+    // (so DriveInfo.IsReady=true → pwsh registers the C: PSDrive) and on
+    // the cache root (so staged shells are readable). Print a clear hint
+    // instead of letting pwsh silently fail to load Microsoft.PowerShell.Management.
+    #[cfg(windows)]
+    {
+        if let Err(e) = psroot_container::setup::require_ready(&cache_root) {
+            eprintln!("{}", e);
+            return Err(e);
+        }
+    }
+
+    // Parse --bind flags into VolumeMount entries.
+    let mut volume_mounts: Vec<psroot_types::config::VolumeMount> = Vec::new();
+    for spec in &bind {
+        // Format is HOST:CONTAINER. HOST may be "C:\path" which contains a
+        // colon, so we can't do a simple split. Strategy: find the *last*
+        // colon-separated token that looks like either a drive letter (`X:`)
+        // or starts with a drive letter + backslash (`X:\...`). Everything
+        // before it (minus the separating colon) is the host side.
+        let parsed = parse_bind_spec(spec).map_err(|e| {
+            psroot_types::error::PsrootError::Other(format!("--bind '{}': {}", spec, e))
+        })?;
+        volume_mounts.push(parsed);
+    }
+
+    // Auto-bind the host user profile when `winget` is requested. winget
+    // needs the AppExecutionAlias at
+    // `C:\Users\<USER>\AppData\Local\Microsoft\WindowsApps\winget.exe` to
+    // be reachable at the same canonical path inside the silo so AppXSvc
+    // can grant package identity. See `install_winget_shim` for the
+    // full rationale.
+    if tools.iter().any(|t| t == "winget") {
+        if let Ok(user) = std::env::var("USERNAME") {
+            if !user.is_empty() {
+                let host = format!("C:\\Users\\{}", user);
+                if std::path::Path::new(&host).exists()
+                    && !volume_mounts.iter().any(|m| m.host_path == host)
+                {
+                    volume_mounts.push(psroot_types::config::VolumeMount {
+                        host_path: host.clone(),
+                        container_path: host,
+                        read_only: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // Build the container first so we have a real rootfs path + container_id.
     let config = ContainerConfig {
-        command: vec!["cmd.exe".into()],
+        command: vec!["cmd.exe".into()], // placeholder; shell_with_plan ignores it
         tools,
+        shares: share,
         network: network_access,
         ports,
+        volumes: volume_mounts,
         resources: ResourceLimits {
             memory: memory_bytes,
             cpu_rate: cpu,
@@ -371,36 +642,398 @@ fn cmd_shell(
         },
         ..default_config()
     };
-
     let container = Container::create(config)?;
     let id = container.id().to_string();
-    let rootfs = container.config().rootfs_path.clone();
+    let rootfs = std::path::PathBuf::from(container.config().rootfs_path.clone());
 
+    let resolver = Resolver::new();
+    let ctx = ResolveContext {
+        container_id: &id,
+        rootfs: &rootfs,
+        network: r_net,
+        cache_root: &cache_root,
+        allow_admin: false,
+    };
+    let plan = resolver.resolve(&req, &ctx).map_err(|e| {
+        psroot_types::error::PsrootError::Other(format!("resolver: {}", e))
+    })?;
+
+    if explain {
+        print_explain(&plan);
+        // Don't actually launch; clean up the empty container.
+        container.remove(false)?;
+        return Ok(());
+    }
+
+    // no_stage: refuse if the plan demands stage ops AND cache is empty.
+    if no_stage && !plan.stage.is_empty() && !plan.cache_dir.exists() {
+        container.remove(false)?;
+        return Err(psroot_types::error::PsrootError::Other(format!(
+            "shell '{}' is not staged and --no-stage was given. Run `psroot stage {}` first.",
+            plan.shell_name, plan.shell_name
+        )));
+    }
+
+    print_shell_banner(&id, container.config(), &network);
+    eprintln!("Shell      : {} (v{})", plan.shell_name, plan.host_source_version);
+    eprintln!("Cache      : {}", plan.cache_dir.display());
+
+    // Determine whether to use Server Silo.
+    let use_silo = match isolate.to_lowercase().as_str() {
+        "full" | "silo" => {
+            let iso = IsolationLevel::detect();
+            if !iso.server_silo {
+                eprintln!("⚠ --isolate full requested but Server Silo not available (need admin + Win10 1809+)");
+                eprintln!("  Falling back to AppContainer isolation.");
+                false
+            } else {
+                true
+            }
+        }
+        "standard" | "appcontainer" | "ac" => false,
+        "auto" | "" => {
+            let iso = IsolationLevel::detect();
+            iso.server_silo
+        }
+        other => {
+            container.remove(false)?;
+            return Err(psroot_types::error::PsrootError::Other(
+                format!("Invalid --isolate '{}': use auto, standard, or full", other)
+            ));
+        }
+    };
+    if use_silo {
+        eprintln!("Isolation  : Server Silo (Docker-like virtual filesystem)");
+        eprintln!("             C: = rootfs only, P: = shell cache");
+    } else {
+        eprintln!("Isolation  : AppContainer (access restricted, host FS visible)");
+    }
+    eprintln!();
+
+    let exit_code = container.shell_with_plan(&plan, use_silo)?;
+    eprintln!("\nShell exited (code {}). Cleaning up...", exit_code);
+    container.remove(false)?;
+    eprintln!("Container {} removed.", id);
+    Ok(())
+}
+
+fn print_shell_banner(id: &str, cfg: &ContainerConfig, network: &str) {
     let iso = IsolationLevel::detect();
-
     eprintln!("╔══════════════════════════════════════════════════╗");
     eprintln!("║  Psroot Interactive Shell                        ║");
-    eprintln!("║  Container: {}                ║", &id);
-    eprintln!("║  Rootfs: ...{}  ║", &rootfs[rootfs.len().saturating_sub(35)..]);
-    eprintln!("║  Network: {:8}  Sandbox: AppContainer       ║", format!("{:?}", container.config().network));
+    eprintln!("║  Container: {:<37}║", id);
+    eprintln!("║  Rootfs   : ...{:<34}║",
+        &cfg.rootfs_path[cfg.rootfs_path.len().saturating_sub(34)..]);
+    eprintln!("║  Network  : {:<8}  Sandbox: AppContainer       ║", network);
     eprintln!("║  Isolation: {:<37}║", iso.tier_name());
     eprintln!("║  Type 'exit' to leave the sandbox                ║");
     eprintln!("╚══════════════════════════════════════════════════╝");
     iso.print_warnings();
     eprintln!();
+}
 
-    // Launch interactive cmd.exe — blocks until user types 'exit'
-    let exit_code = container.shell("cmd.exe")?;
+fn print_explain(plan: &psroot_container::shell_resolver::LaunchPlan) {
+    println!("Resolved shell: {}@{}", plan.shell_name, plan.host_source_version);
+    println!("  Cache : {}", plan.cache_dir.display());
+    println!();
+    println!("Stage operations ({}):", plan.stage.len());
+    for (i, op) in plan.stage.iter().enumerate() {
+        match op {
+            psroot_container::shell_resolver::StageOp::EnsureDir { dst } => {
+                println!("  {}. ensure_dir   {}", i + 1, dst.display());
+            }
+            psroot_container::shell_resolver::StageOp::HardlinkTree { src, dst, exclude } => {
+                println!("  {}. hardlink_tree", i + 1);
+                println!("       src     : {}", src.display());
+                println!("       dst     : {}", dst.display());
+                println!("       exclude : {} patterns", exclude.len());
+            }
+            psroot_container::shell_resolver::StageOp::CopyTree { src, dst, exclude } => {
+                println!("  {}. copy_tree", i + 1);
+                println!("       src     : {}", src.display());
+                println!("       dst     : {}", dst.display());
+                println!("       exclude : {} patterns", exclude.len());
+            }
+            psroot_container::shell_resolver::StageOp::Junction { src, dst } => {
+                println!("  {}. junction     {} -> {}", i + 1, dst.display(), src.display());
+            }
+            psroot_container::shell_resolver::StageOp::Symlink { src, dst } => {
+                println!("  {}. symlink      {} -> {}", i + 1, dst.display(), src.display());
+            }
+            psroot_container::shell_resolver::StageOp::WriteText { dst, content } => {
+                println!("  {}. write_text   {} ({} bytes)", i + 1, dst.display(), content.len());
+            }
+        }
+    }
+    println!();
+    println!("ACE grants ({}):", plan.aces.len());
+    for ace in &plan.aces {
+        println!("  + AC-SID:RX {} on {}",
+            if ace.inherit { "(inherit)" } else { "" },
+            ace.path.display());
+    }
+    println!();
+    println!("Capabilities ({}):", plan.caps.len());
+    for c in &plan.caps {
+        println!("  + {:?}", c);
+    }
+    println!();
+    println!("Launch:");
+    println!("  exe : {}", plan.entry.display());
+    println!("  args: {:?}", plan.args);
+    println!("  cwd : {}", plan.cwd.display());
+    println!("  env diff:");
+    for (k, v) in &plan.env {
+        println!("    {} = {}", k, v);
+    }
+}
 
-    eprintln!();
-    eprintln!("Shell exited (code {}). Cleaning up...", exit_code);
+fn cmd_stage(shell: &str, shell_version: Option<String>, _force: bool) -> psroot_types::error::Result<()> {
+    use psroot_container::shell_resolver::{
+        NetworkAccess as RNet, ResolveContext, Resolver, ShellRequest, VersionReq,
+    };
+    use psroot_container::rootfs_stager;
 
-    // Auto-cleanup
-    container.remove(false)?;
-    eprintln!("Container {} removed.", id);
+    let cache_root = cache_root_dir();
+    std::fs::create_dir_all(&cache_root).ok();
 
+    // For pure stage we don't have a real rootfs — use a scratch one.
+    let scratch = cache_root.join(".stage-scratch");
+    std::fs::create_dir_all(&scratch).ok();
+
+    let mut req = ShellRequest::new(shell);
+    if let Some(vs) = shell_version {
+        req.version = VersionReq::parse(&vs);
+    }
+    let resolver = Resolver::new();
+    let ctx = ResolveContext {
+        container_id: "stage-cli",
+        rootfs: &scratch,
+        network: RNet::None,
+        cache_root: &cache_root,
+        allow_admin: false,
+    };
+    let plan = resolver.resolve(&req, &ctx).map_err(|e| {
+        psroot_types::error::PsrootError::Other(format!("resolver: {}", e))
+    })?;
+
+    println!("Staging {} {} to {}",
+        plan.shell_name, plan.host_source_version, plan.cache_dir.display());
+    let outcome = rootfs_stager::apply_plan(&plan, "S-1-5-32-545", "stage-cli")
+        .map_err(|e| psroot_types::error::PsrootError::Other(format!("stager: {}", e)))?;
+    println!("  ops run     : {}", outcome.stage_ops_run);
+    println!("  ops skipped : {} (cache hit: {})", outcome.stage_ops_skipped, outcome.cache_hit);
+    println!("  ACEs        : {}", outcome.aces_applied.len());
+    println!("Done. Cache  : {}", outcome.cache_dir.display());
     Ok(())
 }
+
+fn cmd_gui(
+    exe: &str,
+    app_root: Option<String>,
+    args: Vec<String>,
+    timeout: u64,
+    extra_dir: Vec<String>,
+    exclude: Vec<String>,
+    no_network: bool,
+) -> psroot_types::error::Result<()> {
+    use psroot_container::app_stage::{AppStageConfig, stage_and_spawn_gui};
+
+    // Build config from exe path
+    let mut config = AppStageConfig::from_exe(exe)?;
+
+    // Apply overrides
+    if let Some(root) = app_root {
+        config = config.with_app_root(&root);
+    }
+    if !args.is_empty() {
+        // Filter out the "--" separator if present
+        let filtered: Vec<String> = args.into_iter().filter(|a| a != "--").collect();
+        config = config.with_args(filtered);
+    }
+    if !exclude.is_empty() {
+        config = config.with_excludes(exclude);
+    }
+    config.network = !no_network;
+
+    // Parse extra directories (format: HOST_PATH:MOUNT_NAME)
+    for spec in &extra_dir {
+        let parts: Vec<&str> = spec.rsplitn(2, ':').collect();
+        if parts.len() == 2 {
+            // rsplitn reverses, so parts[1] is host, parts[0] is mount
+            config = config.with_extra_dir(parts[1], parts[0]);
+        } else {
+            eprintln!("Warning: invalid --extra-dir format '{}', expected HOST_PATH:MOUNT_NAME", spec);
+        }
+    }
+
+    // Print banner
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║  psroot gui — Run any app in an isolated container       ║");
+    println!("╠═══════════════════════════════════════════════════════════╣");
+    println!("║  Exe:      {:<46}║", config.exe_path.display());
+    println!("║  App root: {:<46}║", config.app_root.display());
+    println!("║  Rootfs:   {:<46}║", config.rootfs_path().display());
+    println!("║  Network:  {:<46}║", if config.network { "enabled" } else { "disabled" });
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+
+    // Stage and spawn
+    println!("[1/3] Staging app into container...");
+    let (desktop, proc, rootfs) = stage_and_spawn_gui(&config)?;
+    println!("       Staged: {}", config.staged_exe_path().display());
+    println!("[2/3] Running on isolated desktop: {}", desktop.lpdesktop_name());
+    println!("       PID: {}", proc.process_id);
+    println!();
+    println!("  App is running inside the container.");
+    println!("  Binary: {} (container path)", config.staged_exe_path().display());
+    println!("  Windows are invisible to you (isolated desktop).");
+    println!();
+
+    // Wait or timeout
+    if timeout == 0 {
+        println!("[3/3] Waiting for app to exit (Ctrl+C to terminate)...");
+        let exit_code = proc.wait();
+        println!("       Exit code: {}", exit_code);
+    } else {
+        println!("[3/3] Waiting {} seconds...", timeout);
+        std::thread::sleep(std::time::Duration::from_secs(timeout));
+        if proc.is_running() {
+            proc.terminate();
+            println!("       Terminated after {} seconds.", timeout);
+        } else {
+            let exit_code = proc.wait();
+            println!("       Exited with code: {}", exit_code);
+        }
+    }
+
+    // Cleanup
+    drop(desktop);
+    let _ = std::fs::remove_dir_all(&rootfs);
+    println!("✓ Container destroyed.");
+    Ok(())
+}
+
+fn cmd_shell_list() -> psroot_types::error::Result<()> {
+    use psroot_container::shell_resolver::Resolver;
+    let r = Resolver::new();
+    println!("{:<14} {}", "NAME", "DISPLAY");
+    println!("{}", "─".repeat(60));
+    for entry in r.catalog().entries() {
+        let display = if entry.display.is_empty() { entry.name.as_str() } else { entry.display.as_str() };
+        println!("{:<14} {}", entry.name, display);
+    }
+    Ok(())
+}
+
+fn cmd_shell_info(shell: &str) -> psroot_types::error::Result<()> {
+    use psroot_container::shell_resolver::{
+        NetworkAccess as RNet, ResolveContext, Resolver, ShellRequest,
+    };
+    let r = Resolver::new();
+    let entry = r.lookup(shell).ok_or_else(|| {
+        psroot_types::error::PsrootError::Other(format!("unknown shell '{}'", shell))
+    })?;
+    println!("Catalog entry : {} ({})",
+        entry.name,
+        if entry.display.is_empty() { "—" } else { entry.display.as_str() });
+    println!("Aliases       : {}", entry.aliases.join(", "));
+    println!("Probe rules   : {}", entry.probe.len());
+
+    let cache_root = cache_root_dir();
+    let scratch = cache_root.join(".stage-scratch");
+    std::fs::create_dir_all(&scratch).ok();
+    let req = ShellRequest::new(shell);
+    let ctx = ResolveContext {
+        container_id: "info",
+        rootfs: &scratch,
+        network: RNet::Outbound,
+        cache_root: &cache_root,
+        allow_admin: false,
+    };
+    match r.resolve(&req, &ctx) {
+        Ok(plan) => {
+            println!("Host install  : {} (v{})", plan.entry.display(), plan.host_source_version);
+            println!("Cache dir     : {} (exists: {})",
+                plan.cache_dir.display(), plan.cache_dir.exists());
+            println!("Stage ops     : {}", plan.stage.len());
+            println!("ACE grants    : {}", plan.aces.len());
+            println!("Caps (outbound): {:?}", plan.caps);
+        }
+        Err(e) => {
+            println!("Status        : NOT INSTALLED ({})", e);
+        }
+    }
+    Ok(())
+}
+
+fn cache_root_dir() -> std::path::PathBuf {
+    if let Ok(v) = std::env::var("PSROOT_CACHE_DIR") {
+        return std::path::PathBuf::from(v);
+    }
+    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Default".into());
+    std::path::PathBuf::from(home).join(".psroot").join("cache").join("shells")
+}
+
+#[cfg(windows)]
+fn cmd_setup(dry_run: bool) -> psroot_types::error::Result<()> {
+    use psroot_container::setup;
+    let cache_root = cache_root_dir();
+
+    println!("psroot setup — checking AppContainer prerequisites");
+    println!("  cache root: {}", cache_root.display());
+    println!();
+
+    let checks = setup::check_status(&cache_root);
+    let mut needed = 0usize;
+    for c in &checks {
+        let status = if c.has_all_app_packages { "OK    " } else { "MISSING" };
+        println!("  [{}] {}", status, c.path);
+        if !c.has_all_app_packages {
+            println!("           -> {}", c.note);
+            needed += 1;
+        }
+    }
+    println!();
+
+    if dry_run {
+        if needed == 0 {
+            println!("All ACE prerequisites satisfied. (Privilege grants not checked in dry-run.)");
+        } else {
+            println!("[dry-run] {} ACE grant(s) would be applied. Re-run without --dry-run.", needed);
+        }
+        return Ok(());
+    }
+
+    if needed > 0 {
+        println!("Applying {} ACE grant(s) (requires admin)...", needed);
+    }
+    // Always run apply — it also grants SeTcbPrivilege (needed for --isolate full).
+    let applied = setup::apply(&cache_root)?;
+    if applied.is_empty() {
+        println!("All prerequisites satisfied. Nothing to do.");
+    } else {
+        for p in &applied {
+            if p == "SeTcbPrivilege (LSA)" {
+                println!("  + granted SeTcbPrivilege to current user (LSA)");
+                println!("    NOTE: Log out and back in for the new privilege to take effect.");
+            } else {
+                println!("  + granted ALL APPLICATION PACKAGES on {}", p);
+            }
+        }
+        println!();
+        println!("Setup complete. You can now run:  psroot shell --shell pwsh");
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn cmd_setup(_dry_run: bool) -> psroot_types::error::Result<()> {
+    Err(psroot_types::error::PsrootError::Other(
+        "psroot setup is only supported on Windows".into(),
+    ))
+}
+
 
 fn cmd_stop(id: &str) -> psroot_types::error::Result<()> {
     let mut container = Container::load(id)?;
@@ -1434,7 +2067,7 @@ fn test_silo_isolation(passed: &mut u32, failed: &mut u32) -> psroot_types::erro
         max_processes: 20,
         ..Default::default()
     };
-    let mut silo = Silo::create(&rootfs.to_string_lossy(), Some(&limits))?;
+    let mut silo = Silo::create(&rootfs.to_string_lossy(), Some(&limits), &[])?;
     pass(passed, &format!("(silo_id={})", silo.silo_id()));
 
     // 10.2: Spawn inside silo
@@ -2072,6 +2705,7 @@ fn default_config() -> ContainerConfig {
         working_directory: "C:\\".into(),
         silo: false,
         tools: Vec::new(),
+        shares: Vec::new(),
         security_profile: SecurityProfile::Default,
         network: NetworkAccess::None,
         ports: Vec::new(),
@@ -2116,8 +2750,9 @@ fn build_config(
         "none" | "" => NetworkAccess::None,
         "outbound" | "out" => NetworkAccess::Outbound,
         "full" | "all" => NetworkAccess::Full,
+        "netstack" | "ns" => NetworkAccess::Netstack,
         other => return Err(psroot_types::error::PsrootError::Other(
-            format!("Invalid network mode '{}': use none, outbound, or full", other)
+            format!("Invalid network mode '{}': use none, outbound, full, or netstack", other)
         )),
     };
 
@@ -2139,6 +2774,7 @@ fn build_config(
         working_directory: workdir,
         silo,
         tools,
+        shares: Vec::new(),
         security_profile: SecurityProfile::Default,
         network: network_access,
         ports,
@@ -2182,5 +2818,127 @@ fn parse_volume(s: &str) -> Option<VolumeMount> {
         })
     } else {
         None
+    }
+}
+
+/// Parse a `--bind` spec: `HOST_PATH:CONTAINER_PATH[:ro]` where both sides may
+/// be Windows paths containing drive-letter colons. Algorithm: scan for the
+/// separator colon by looking for the unique colon that is immediately
+/// followed by either a drive-letter target (`X:` or `X:\`) or a path
+/// starting with `\` or `/`. Falls back to splitting on the last colon that
+/// isn't the first two chars (which are always part of the drive letter).
+fn parse_bind_spec(s: &str) -> Result<VolumeMount, String> {
+    let raw = s.trim();
+    // Strip trailing :ro or :rw suffix.
+    let (body, read_only) = if let Some(stripped) = raw.strip_suffix(":ro") {
+        (stripped, true)
+    } else if let Some(stripped) = raw.strip_suffix(":rw") {
+        (stripped, false)
+    } else {
+        (raw, false)
+    };
+
+    // Find the separator: we want to split into HOST and CONTAINER. The host
+    // side always starts with a drive letter (X:), so the first two chars
+    // are `X:`. The separator we're looking for is the NEXT colon at an odd
+    // position. Starting from index 2, scan for the first `:` that is
+    // either (a) at end of string, or (b) followed by `\` or `/` or a
+    // drive letter `[A-Z]:`.
+    let bytes = body.as_bytes();
+    if body.len() < 3 || bytes[1] != b':' {
+        return Err(format!(
+            "host path must start with a drive letter (got '{}')",
+            body
+        ));
+    }
+    let mut sep: Option<usize> = None;
+    let mut i = 2;
+    while i < body.len() {
+        if bytes[i] == b':' {
+            // Candidate separator at index i.
+            let next = bytes.get(i + 1).copied();
+            match next {
+                // `X:\` or `X:/` – container side is a path. We need this
+                // colon to be the drive-letter colon of the container side,
+                // i.e. the one right BEFORE it must be an ASCII letter.
+                Some(b'\\') | Some(b'/') | None => {
+                    // If the colon is followed by \ or /, it could be the
+                    // container drive-letter colon. Verify by checking the
+                    // preceding byte is A-Za-z.
+                    if i >= 1 && bytes[i - 1].is_ascii_alphabetic() && (i == 1 || bytes[i - 2] == b':' || bytes[i - 2] == b'\\' || bytes[i - 2] == b'/') {
+                        // Letter-immediately-before: this IS the container
+                        // drive-letter colon. The REAL separator is the
+                        // colon just before the letter. Back up one char.
+                        // Example: "C:\proj:D:\mnt" — i=7 (':' after D),
+                        // letter D at i-1=6, separator colon at i-2=5.
+                        // But wait — bytes[i-2]=':' means we want the colon
+                        // at i-2? No: separator is between host and container.
+                        // Let me re-derive.
+                        // body = "C:\proj:D:\mnt"
+                        //          0 1 2 3 4 5 6 7 8 9 ...
+                        //          C : \ p r o j : D : \ m n t
+                        //                          ^separator=7
+                        // At i=7 (colon), next='D'? No — with this branch we're
+                        // inside Some('\\') which means i points to the COLON
+                        // AFTER D: actually no, let's step back. If next is
+                        // \ or / then bytes[i]=':' and bytes[i+1]='\'. So
+                        // at i=9 (':' of D:), next='\\'. The separator is
+                        // indeed at i-2=7 (colon between 'proj' and 'D').
+                        sep = Some(i - 2);
+                        break;
+                    }
+                    // Otherwise: the colon at i itself is the separator
+                    // (container side = no drive letter, e.g. "/mnt/x").
+                    sep = Some(i);
+                    break;
+                }
+                // `X:X` — the container side is a bare drive letter like "M:".
+                Some(ch) if ch.is_ascii_alphabetic() => {
+                    // Require this to be followed by `:` or end-of-string.
+                    let after_letter = bytes.get(i + 2).copied();
+                    if matches!(after_letter, Some(b':') | None) {
+                        sep = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    let sep = sep.ok_or_else(|| format!("cannot find HOST:CONTAINER separator in '{}'", body))?;
+    let host = &body[..sep];
+    let container = &body[sep + 1..];
+    if host.is_empty() || container.is_empty() {
+        return Err("empty host or container path".into());
+    }
+    Ok(VolumeMount {
+        host_path: host.to_string(),
+        container_path: container.to_string(),
+        read_only,
+    })
+}
+
+#[cfg(test)]
+mod bind_spec_tests {
+    use super::parse_bind_spec;
+    #[test]
+    fn path_to_path() {
+        let v = parse_bind_spec("C:\\proj:D:\\mnt\\proj").unwrap();
+        assert_eq!(v.host_path, "C:\\proj");
+        assert_eq!(v.container_path, "D:\\mnt\\proj");
+        assert!(!v.read_only);
+    }
+    #[test]
+    fn path_to_drive_letter() {
+        let v = parse_bind_spec("C:\\Users\\me:M:").unwrap();
+        assert_eq!(v.host_path, "C:\\Users\\me");
+        assert_eq!(v.container_path, "M:");
+    }
+    #[test]
+    fn ro_suffix() {
+        let v = parse_bind_spec("C:\\proj:C:\\proj:ro").unwrap();
+        assert!(v.read_only);
+        assert_eq!(v.container_path, "C:\\proj");
     }
 }

@@ -7,8 +7,16 @@ members = [
     "crates/psroot-namespace",
     "crates/psroot-silo",
     "crates/psroot-portmap",
+    "crates/psroot-netstack-proto",
+    "crates/psroot-netstack-ipc",
+    "crates/psroot-netstack-host",
+    "crates/psroot-netshim",
+    "crates/psroot-netinject",
     "crates/psroot-container",
+    "crates/psroot-desktop",
     "crates/psroot-cli",
+    "crates/psroot-shell-resolver",
+    "crates/psroot-rootfs-stager",
 ]
 
 [workspace.package]
@@ -23,6 +31,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_Security_Authentication_Identity",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Kernel",
@@ -30,6 +39,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Diagnostics_ToolHelp",
 ]}
 thiserror = "2"
 tracing = "0.1"

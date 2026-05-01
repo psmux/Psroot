@@ -11,8 +11,18 @@ psroot-silo = { path = "../psroot-silo" }
 psroot-bindlink = { path = "../psroot-bindlink" }
 psroot-namespace = { path = "../psroot-namespace" }
 psroot-portmap = { path = "../psroot-portmap" }
+psroot-netstack-host = { path = "../psroot-netstack-host" }
+psroot-netstack-ipc = { path = "../psroot-netstack-ipc" }
+psroot-netstack-proto = { path = "../psroot-netstack-proto" }
+psroot-netinject = { path = "../psroot-netinject" }
+psroot-desktop = { path = "../psroot-desktop" }
+psroot-shell-resolver = { path = "../psroot-shell-resolver" }
+psroot-rootfs-stager = { path = "../psroot-rootfs-stager" }
 windows-sys = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

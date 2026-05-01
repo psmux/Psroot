@@ -1,0 +1,45 @@
+[package]
+name = "psroot-netshim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Container-side shim: Winsock-shaped API that proxies calls to the host netstack daemon over IPC"
+
+[lib]
+# Dual output: rlib for unit tests and direct Rust consumers; cdylib so
+# the same crate can be injected into target processes via
+# `psroot-netinject` (CreateRemoteThread + LoadLibraryW).
+crate-type = ["rlib", "cdylib"]
+
+# The Phase-3 cross-process injection E2E test spawns this child binary.
+# Built automatically by `cargo test`; the path is resolved via
+# `env!("CARGO_BIN_EXE_psroot-netshim-testchild")`.
+[[bin]]
+name = "psroot-netshim-testchild"
+path = "bin/ns_testchild.rs"
+
+[dependencies]
+psroot-netstack-proto = { path = "../psroot-netstack-proto" }
+psroot-netstack-ipc = { path = "../psroot-netstack-ipc" }
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# IAT patching is done manually via windows-sys — no external hooker
+# dependency (retour 0.3 requires nightly).
+once_cell = "1"
+parking_lot = "0.12"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+psroot-netstack-host = { path = "../psroot-netstack-host" }
+psroot-netinject = { path = "../psroot-netinject" }

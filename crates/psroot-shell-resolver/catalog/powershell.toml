@@ -1,0 +1,29 @@
+# Built-in catalog entry: Windows PowerShell 5.1
+#
+# powershell.exe (v5.1) lives in System32 alongside cmd.exe and is reachable
+# directly through the bind-linked System32 — no extra staging needed.
+
+name        = "powershell"
+display     = "Windows PowerShell 5.1"
+aliases     = ["powershell.exe", "winpwsh"]
+prefer_global = false
+
+caps_when_outbound = ["internetClient"]
+caps_when_full     = ["internetClient", "internetClientServer"]
+
+[[probe]]
+type = "path"
+glob = "{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+
+[launch]
+entry = "{rootfs}\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+args  = ["-NoLogo"]
+cwd   = "{rootfs}\\Users\\ContainerUser"
+
+[launch.env]
+"PSModulePath" = "{rootfs}\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules"
+"PATH_PREPEND" = "{rootfs}\\Windows\\System32\\WindowsPowerShell\\v1.0"
+"PATHEXT_APPEND" = ".PS1;.PSM1"
+
+[version]
+detect = "exe_version"

@@ -107,6 +107,8 @@ psroot run --tool node -- node -e "console.log(process.env.USERNAME)"
 
 ## Next Steps
 
+- [Interactive Shells](./interactive-shells.md) — shell selection, environment, caching
+- [Networking Inside Sandboxes](./sandbox-networking.md) — ping, DNS, SSH, IP discovery
 - [Container Lifecycle](./container-lifecycle.md) — create, start, exec, stop, remove
 - [Isolation Guide](./isolation.md) — how the sandbox works, what's blocked
 - [Network & Tools](./network-and-tools.md) — networking modes, tool provisioning
