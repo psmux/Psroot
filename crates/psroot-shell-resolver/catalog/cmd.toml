@@ -1,0 +1,29 @@
+# Built-in catalog entry: Windows Command Prompt.
+#
+# cmd.exe lives in System32 which is already bind-linked into the rootfs by the
+# rootfs preparer, so no staging is needed.
+
+name        = "cmd"
+display     = "Windows Command Prompt"
+aliases     = ["cmd.exe", "command"]
+prefer_global = false
+
+caps_when_outbound = ["internetClient"]
+caps_when_full     = ["internetClient", "internetClientServer"]
+
+[[probe]]
+type = "path"
+glob = "{system_root}\\System32\\cmd.exe"
+
+# No staging required — cmd.exe is part of the bind-linked System32.
+# `stage = []` is implicit when omitted.
+
+[launch]
+entry = "{rootfs}\\Windows\\System32\\cmd.exe"
+args  = []
+cwd   = "{rootfs}\\Users\\ContainerUser"
+
+[launch.env]
+
+[version]
+detect = "exe_version"

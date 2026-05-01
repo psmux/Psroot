@@ -27,6 +27,14 @@ struct StateFile {
     silo_id: Option<u32>,
     #[serde(default)]
     ports: Vec<PortMapping>,
+    /// ACEs the rootfs-stager added on behalf of this container — must be
+    /// revoked on `remove`. Empty for legacy containers.
+    #[serde(default)]
+    ace_grants_applied: Vec<psroot_rootfs_stager::AceGrantRecord>,
+    /// Cache directories whose refcount this container increments — must
+    /// be decremented on `remove`.
+    #[serde(default)]
+    cache_refs: Vec<String>,
 }
 
 /// The data root for all Psroot containers.
@@ -45,6 +53,8 @@ struct Runtime {
     silo: Option<Silo>,
     bind_filter: Option<BindFilter>,
     port_mapper: Option<PortMapper>,
+    #[cfg(windows)]
+    netstack: Option<crate::netstack_runtime::NetstackRuntime>,
 }
 
 /// A Psroot container.
@@ -72,11 +82,16 @@ impl Container {
         }
 
         // Prepare rootfs with essential binaries and optional tools
-        if config.tools.is_empty() {
+        if config.tools.is_empty() && config.shares.is_empty() {
             rootfs::prepare_rootfs(&config.rootfs_path)?;
         } else {
             let tools_refs: Vec<&str> = config.tools.iter().map(|s| s.as_str()).collect();
-            rootfs::prepare_rootfs_with_tools(&config.rootfs_path, &tools_refs)?;
+            let share_refs: Vec<&str> = config.shares.iter().map(|s| s.as_str()).collect();
+            rootfs::prepare_rootfs_with_tools_and_shares(
+                &config.rootfs_path,
+                &tools_refs,
+                &share_refs,
+            )?;
         }
 
         // Write config
@@ -90,6 +105,8 @@ impl Container {
             pid: None,
             silo_id: None,
             ports: config.ports.clone(),
+            ace_grants_applied: Vec::new(),
+            cache_refs: Vec::new(),
         };
         fs::write(dir.join("state.json"), serde_json::to_string_pretty(&state_file)?)?;
 
@@ -104,7 +121,10 @@ impl Container {
             runtime: Runtime {
                 job: None,
                 silo: None,
-                bind_filter: None,                port_mapper: None,            },
+                bind_filter: None,                port_mapper: None,
+                #[cfg(windows)]
+                netstack: None,
+            },
         })
     }
 
@@ -166,6 +186,7 @@ impl Container {
             let mut silo = Silo::create(
                 &self.config.rootfs_path,
                 Some(&self.config.resources),
+                &[],
             )?;
 
             // Bind links for volumes (with rollback on failure)
@@ -201,9 +222,34 @@ impl Container {
             let bf = self.setup_bind_links(&caps)?;
             self.runtime.bind_filter = bf;
 
+            // ── Optional: spin up the userland netstack BEFORE spawn
+            //    so the child process inherits PSROOT_NS_* env vars
+            //    and `DllMain` can attach to our SHM immediately after
+            //    `LoadLibraryW`. Failure here is non-fatal: we fall
+            //    through to OS networking governed by the AppContainer
+            //    caps configured in `build_network_capabilities`.
+            #[cfg(windows)]
+            let netstack = self.try_start_netstack();
+            #[cfg(windows)]
+            if let Some(ns) = netstack.as_ref() {
+                for (k, v) in ns.child_env() {
+                    self.config.env.insert(k.to_string(), v);
+                }
+            }
+
             // Spawn sandboxed process (restricted token, low integrity, explicit env)
             let cmd = self.config.command.join(" ");
             let pid = crate::sandbox::spawn_sandboxed(&cmd, &self.config, &job)?;
+
+            #[cfg(windows)]
+            if let Some(ns) = netstack {
+                // Inject the shim DLL into the just-spawned child.
+                // `spawn_sandboxed` returned only the pid — re-open
+                // the process with the rights LoadLibraryW injection
+                // needs. Injection is best-effort: on failure the
+                // container still runs, it just uses OS networking.
+                self.try_inject_netstack(pid, ns);
+            }
 
             info!(id = %self.id, pid, "Container started (job mode)");
             self.runtime.job = Some(job);
@@ -254,6 +300,52 @@ impl Container {
         crate::sandbox::spawn_interactive(cmd, &self.config)
     }
 
+    /// Plan-aware interactive shell: stages the host shell + grants ACEs +
+    /// spawns. Persists the applied ACEs and cache refcount to `state.json`
+    /// so `remove` can revoke them.
+    ///
+    /// When `use_silo` is true, uses Server Silo for full filesystem isolation
+    /// (process only sees rootfs as C:\). Falls back to AppContainer if silo
+    /// creation fails.
+    pub fn shell_with_plan(
+        &self,
+        plan: &psroot_shell_resolver::LaunchPlan,
+        use_silo: bool,
+    ) -> Result<u32> {
+        let (_sid, exit_code) = if use_silo {
+            crate::sandbox::spawn_interactive_plan_silo(plan, &self.config)?
+        } else {
+            crate::sandbox::spawn_interactive_plan(plan, &self.config)?
+        };
+
+        // Persist ACE records + cache ref into state.json.
+        let state_path = self.dir.join("state.json");
+        if let Ok(content) = fs::read_to_string(&state_path) {
+            if let Ok(mut sf) = serde_json::from_str::<StateFile>(&content) {
+                // We don't have the AceGrantRecord list here (stager applied
+                // them), so re-derive from the plan + the SID we just got.
+                for ace in &plan.aces {
+                    let access = match ace.access {
+                        psroot_shell_resolver::AccessMask::ReadExecute => "RX".to_string(),
+                    };
+                    sf.ace_grants_applied.push(psroot_rootfs_stager::AceGrantRecord {
+                        path: ace.path.display().to_string(),
+                        sid: _sid.clone(),
+                        mask: access,
+                        inherit: ace.inherit,
+                    });
+                }
+                let cache_dir = plan.cache_dir.display().to_string();
+                if !sf.cache_refs.contains(&cache_dir) {
+                    sf.cache_refs.push(cache_dir);
+                }
+                let _ = fs::write(&state_path, serde_json::to_string_pretty(&sf)?);
+            }
+        }
+
+        Ok(exit_code)
+    }
+
     // ────────────────────────────── stats ───────────────────────────────
 
     pub fn stats(&self) -> Result<ContainerStats> {
@@ -295,11 +387,100 @@ impl Container {
             mapper.shutdown();
             drop(mapper);
         }
+        #[cfg(windows)]
+        if let Some(ns) = self.runtime.netstack.take() {
+            // Drop shuts the daemon thread down via the stop flag.
+            drop(ns);
+        }
 
         self.state = ContainerState::Stopped;
         self.write_state()?;
         info!(id = %self.id, "Container stopped");
         Ok(())
+    }
+
+    // ─────────────────────── netstack wiring (Phase 3) ──────────────────
+
+    #[cfg(windows)]
+    fn try_start_netstack(&self) -> Option<crate::netstack_runtime::NetstackRuntime> {
+        use crate::netstack_runtime::{
+            default_dll_path, loopback_translator, virtual_ip_for, NetstackRuntime,
+        };
+
+        if self.config.network != NetworkAccess::Netstack {
+            return None;
+        }
+        let dll = match default_dll_path() {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    id = %self.id,
+                    "network=netstack requested but psroot_netshim.dll not found next to the psroot binary; falling back to OS networking"
+                );
+                return None;
+            }
+        };
+        let virt = virtual_ip_for(&self.id);
+        match NetstackRuntime::spawn(&self.id, dll, virt, Some(loopback_translator(virt))) {
+            Ok(ns) => {
+                info!(id = %self.id, virt = %virt, "Netstack daemon started");
+                Some(ns)
+            }
+            Err(e) => {
+                tracing::warn!(id = %self.id, error = %e, "Netstack daemon failed to start");
+                None
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn try_inject_netstack(
+        &mut self,
+        pid: u32,
+        ns: crate::netstack_runtime::NetstackRuntime,
+    ) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION,
+            PROCESS_VM_READ, PROCESS_VM_WRITE,
+        };
+
+        let rights = PROCESS_CREATE_THREAD
+            | PROCESS_QUERY_INFORMATION
+            | PROCESS_VM_OPERATION
+            | PROCESS_VM_READ
+            | PROCESS_VM_WRITE;
+        let handle = unsafe { OpenProcess(rights, 0, pid) };
+        if handle.is_null() {
+            tracing::warn!(
+                id = %self.id,
+                pid,
+                "OpenProcess failed for netstack injection; keeping daemon alive (child may not have network)"
+            );
+            self.runtime.netstack = Some(ns);
+            return;
+        }
+        // SAFETY: `handle` was just opened with the rights
+        // `inject_dll` requires; we close it in all paths below.
+        let result = unsafe { ns.inject_into(handle) };
+        unsafe {
+            CloseHandle(handle);
+        }
+        match result {
+            Ok(()) => {
+                info!(id = %self.id, pid, "Netstack shim DLL injected");
+                self.runtime.netstack = Some(ns);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    id = %self.id,
+                    pid,
+                    error = %e,
+                    "Netstack DLL injection failed; dropping daemon"
+                );
+                // Dropping `ns` here shuts the daemon down cleanly.
+            }
+        }
     }
 
     // ────────────────────────────── remove ──────────────────────────────
@@ -314,6 +495,22 @@ impl Container {
                     current: "running".into(),
                     expected: "stopped or created".into(),
                 });
+            }
+        }
+
+        // Revoke ACEs the stager added (and decrement cache refcounts).
+        let state_path = self.dir.join("state.json");
+        if let Ok(content) = fs::read_to_string(&state_path) {
+            if let Ok(sf) = serde_json::from_str::<StateFile>(&content) {
+                for rec in &sf.ace_grants_applied {
+                    let _ = psroot_rootfs_stager::revoke_ace_record(rec);
+                }
+                for cache_dir in &sf.cache_refs {
+                    let _ = psroot_rootfs_stager::unreference_cache(
+                        std::path::Path::new(cache_dir),
+                        &self.id,
+                    );
+                }
             }
         }
 
@@ -366,6 +563,8 @@ impl Container {
                 silo: None,
                 bind_filter: None,
                 port_mapper: None,
+                #[cfg(windows)]
+                netstack: None,
             },
         })
     }
@@ -455,12 +654,25 @@ impl Container {
     }
 
     fn write_state(&self) -> Result<()> {
+        // Preserve ace_grants_applied + cache_refs from existing state.json (if any).
+        let (existing_aces, existing_refs) = {
+            let p = self.dir.join("state.json");
+            match fs::read_to_string(&p) {
+                Ok(s) => match serde_json::from_str::<StateFile>(&s) {
+                    Ok(sf) => (sf.ace_grants_applied, sf.cache_refs),
+                    Err(_) => (Vec::new(), Vec::new()),
+                },
+                Err(_) => (Vec::new(), Vec::new()),
+            }
+        };
         let sf = StateFile {
             status: self.state,
             created: self.created.clone(),
             pid: self.runtime.silo.as_ref().and_then(|s| s.init_pid()),
             silo_id: self.runtime.silo.as_ref().map(|s| s.silo_id()),
             ports: self.config.ports.clone(),
+            ace_grants_applied: existing_aces,
+            cache_refs: existing_refs,
         };
         fs::write(
             self.dir.join("state.json"),

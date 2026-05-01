@@ -1,0 +1,80 @@
+name        = "msedge"
+display     = "Microsoft Edge"
+aliases     = ["edge", "chromium-edge"]
+prefer_global = false
+
+caps_when_outbound = ["internetClient"]
+caps_when_full     = ["internetClient", "internetClientServer"]
+
+# Probe chain: registry → path glob (Edge is always installed on Win10+)
+[[probe]]
+type = "registry"
+hive = "HKLM"
+key  = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\msedge.exe"
+value = "Path"
+
+[[probe]]
+type = "path"
+glob = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+
+[[probe]]
+type = "path"
+glob = "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
+
+# Staging operations
+[[stage]]
+op = "ensure_dir"
+dst = "{rootfs}\\Users\\ContainerUser"
+
+[[stage]]
+op = "ensure_dir"
+dst = "{rootfs}\\Temp"
+
+[[stage]]
+op = "hardlink_tree"
+src = "{shell_root}"
+dst = "{cache_dir}"
+exclude = [
+    "*.pdb",
+    "**/Installer/**",
+    "**/SetupMetrics/**",
+]
+
+[[stage]]
+op = "junction"
+src = "{cache_dir}"
+dst = "{rootfs}\\Edge"
+
+# ACL grants
+[[ace]]
+path    = "{cache_dir}"
+access  = "RX"
+inherit = true
+
+[[ace]]
+path    = "{rootfs}\\Temp"
+access  = "F"
+inherit = true
+
+[[ace]]
+path    = "{rootfs}\\Users\\ContainerUser"
+access  = "F"
+inherit = true
+
+[launch]
+entry = "{rootfs}\\Edge\\msedge.exe"
+args  = [
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-default-apps",
+    "--user-data-dir={rootfs}\\Users\\ContainerUser\\EdgeData",
+]
+cwd   = "{rootfs}\\Users\\ContainerUser"
+
+[launch.env]
+"TMP"     = "{rootfs}\\Temp"
+"TEMP"    = "{rootfs}\\Temp"
+"TMPDIR"  = "{rootfs}\\Temp"
+
+[version]
+detect = "exe_version"

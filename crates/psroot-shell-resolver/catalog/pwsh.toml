@@ -1,0 +1,91 @@
+# Built-in catalog entry: PowerShell 7+.
+
+name        = "pwsh"
+display     = "PowerShell 7"
+aliases     = ["powershell-core", "pwsh7"]
+prefer_global = false
+
+caps_when_outbound = ["internetClient"]
+caps_when_full     = ["internetClient", "internetClientServer"]
+
+[[probe]]
+type = "env"
+var  = "PSROOT_PWSH"
+
+[[probe]]
+type = "registry"
+hive = "HKLM"
+key  = "SOFTWARE\\Microsoft\\PowerShellCore\\InstalledVersions"
+value = "InstallLocation"
+
+[[probe]]
+type = "path"
+glob = "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+
+[[probe]]
+type = "path"
+glob = "{program_files}\\PowerShell\\7\\pwsh.exe"
+
+[[stage]]
+op = "ensure_dir"
+dst = "{rootfs}\\Users\\ContainerUser\\Documents\\PowerShell\\Modules"
+
+[[stage]]
+op = "ensure_dir"
+dst = "{rootfs}\\Users\\ContainerUser\\Documents\\PowerShell\\Modules\\PsrootNet"
+
+[[stage]]
+op = "ensure_dir"
+dst = "{rootfs}\\Users\\ContainerUser\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine"
+
+# Stage PsrootNet module (ping, DNS, port-scan tools that work inside AppContainer)
+[[stage]]
+op      = "write_text"
+dst     = "{rootfs}\\Users\\ContainerUser\\Documents\\PowerShell\\Modules\\PsrootNet\\PsrootNet.psm1"
+content = "@builtin:PsrootNet.psm1"
+
+[[stage]]
+op      = "write_text"
+dst     = "{rootfs}\\Users\\ContainerUser\\Documents\\PowerShell\\Modules\\PsrootNet\\PsrootNet.psd1"
+content = "@builtin:PsrootNet.psd1"
+
+[[stage]]
+op = "hardlink_tree"
+src = "{shell_root}"
+dst = "{cache_dir}"
+exclude = [
+    "*.pdb",
+    "**/ref/**",
+    "**/cs/**", "**/de/**", "**/es/**", "**/fr/**", "**/it/**",
+    "**/ja/**", "**/ko/**", "**/pl/**", "**/pt-BR/**", "**/ru/**",
+    "**/tr/**", "**/zh-Hans/**", "**/zh-Hant/**",
+]
+
+[[stage]]
+op = "junction"
+src = "{cache_dir}"
+dst = "{rootfs}\\PSH"
+
+[[ace]]
+path    = "{cache_dir}"
+access  = "RX"
+inherit = true
+
+[launch]
+entry = "{rootfs}\\PSH\\pwsh.exe"
+args  = ["-NoLogo"]
+cwd   = "{rootfs}\\Users\\ContainerUser"
+
+[launch.env]
+"DOTNET_ROOT"                 = "{rootfs}\\PSH"
+"DOTNET_CLI_TELEMETRY_OPTOUT" = "1"
+"DOTNET_NOLOGO"               = "1"
+"POWERSHELL_TELEMETRY_OPTOUT" = "1"
+"POWERSHELL_UPDATECHECK"      = "Off"
+"PSModulePath"                = "{rootfs}\\PSH\\Modules;{rootfs}\\Users\\ContainerUser\\Documents\\PowerShell\\Modules"
+"PATH_PREPEND"                = "{rootfs}\\PSH;{rootfs}\\PSH\\Modules"
+"PATHEXT_APPEND"              = ".PS1;.PSM1"
+
+[version]
+detect = "exe_version"
+min    = "7.2.0"

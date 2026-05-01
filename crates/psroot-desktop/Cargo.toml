@@ -1,0 +1,11 @@
+[package]
+name = "psroot-desktop"
+version.workspace = true
+edition.workspace = true
+description = "Isolated Windows Desktop objects for headful GUI process containment"
+
+[dependencies]
+psroot-types = { path = "../psroot-types" }
+windows-sys = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

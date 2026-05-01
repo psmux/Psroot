@@ -1,0 +1,9 @@
+[package]
+name = "psroot-netstack-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol between psroot-netshim (container) and psroot-netstack-host (runtime)"
+
+[dependencies]

@@ -1,0 +1,86 @@
+name        = "chrome"
+display     = "Google Chrome"
+aliases     = ["google-chrome", "chromium"]
+prefer_global = false
+
+caps_when_outbound = ["internetClient"]
+caps_when_full     = ["internetClient", "internetClientServer"]
+
+# Probe chain: env → registry → path glob
+[[probe]]
+type = "env"
+var  = "CHROME_ROOT"
+
+[[probe]]
+type = "registry"
+hive = "HKLM"
+key  = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe"
+value = "Path"
+
+[[probe]]
+type = "path"
+glob = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+
+[[probe]]
+type = "path"
+glob = "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+
+# Staging operations — hardlink the full Chrome install tree into cache
+[[stage]]
+op = "ensure_dir"
+dst = "{rootfs}\\Users\\ContainerUser"
+
+[[stage]]
+op = "ensure_dir"
+dst = "{rootfs}\\Temp"
+
+[[stage]]
+op = "hardlink_tree"
+src = "{shell_root}"
+dst = "{cache_dir}"
+exclude = [
+    "*.pdb",
+    "**/Installer/**",
+    "**/SetupMetrics/**",
+    "**/first_run_dialog/**",
+]
+
+[[stage]]
+op = "junction"
+src = "{cache_dir}"
+dst = "{rootfs}\\Chrome"
+
+# ACL grants — AppContainer SID gets read+execute on Chrome tree
+[[ace]]
+path    = "{cache_dir}"
+access  = "RX"
+inherit = true
+
+# Temp dir needs write access for Chrome's profile/cache
+[[ace]]
+path    = "{rootfs}\\Temp"
+access  = "F"
+inherit = true
+
+[[ace]]
+path    = "{rootfs}\\Users\\ContainerUser"
+access  = "F"
+inherit = true
+
+[launch]
+entry = "{rootfs}\\Chrome\\chrome.exe"
+args  = [
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-default-apps",
+    "--user-data-dir={rootfs}\\Users\\ContainerUser\\ChromeData",
+]
+cwd   = "{rootfs}\\Users\\ContainerUser"
+
+[launch.env]
+"TMP"     = "{rootfs}\\Temp"
+"TEMP"    = "{rootfs}\\Temp"
+"TMPDIR"  = "{rootfs}\\Temp"
+
+[version]
+detect = "exe_version"

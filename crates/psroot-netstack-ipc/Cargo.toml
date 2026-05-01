@@ -1,0 +1,20 @@
+[package]
+name = "psroot-netstack-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lock-free SPSC ring over shared memory for psroot netstack IPC"
+
+[dependencies]
+psroot-netstack-proto = { path = "../psroot-netstack-proto" }
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_System_WindowsProgramming",
+] }

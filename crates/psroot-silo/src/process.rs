@@ -27,6 +27,29 @@ pub fn create_in_silo(
     env: Option<&[(String, String)]>,
     cwd: Option<&str>,
 ) -> Result<ProcessInfo> {
+    create_in_silo_impl(job, command_line, env, cwd, false)
+}
+
+/// Create an **interactive** process inside the silo job.
+///
+/// Unlike `create_in_silo`, this inherits the parent console (stdin/stdout/stderr)
+/// so the user gets an interactive shell experience. No `CREATE_NO_WINDOW`.
+pub fn create_in_silo_interactive(
+    job: &JobObject,
+    command_line: &str,
+    env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
+) -> Result<ProcessInfo> {
+    create_in_silo_impl(job, command_line, env, cwd, true)
+}
+
+fn create_in_silo_impl(
+    job: &JobObject,
+    command_line: &str,
+    env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
+    interactive: bool,
+) -> Result<ProcessInfo> {
     // Command line must be mutable wide buffer
     let mut cmd_wide: Vec<u16> = command_line.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -42,7 +65,12 @@ pub fn create_in_silo(
 
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-    let flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
+    let flags = if interactive {
+        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT
+    } else {
+        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT
+    };
+    let inherit_handles = if interactive { 1 } else { 0 };
 
     let ok = unsafe {
         CreateProcessW(
@@ -50,7 +78,7 @@ pub fn create_in_silo(
             cmd_wide.as_mut_ptr(),      // lpCommandLine (mutable!)
             std::ptr::null(),           // lpProcessAttributes
             std::ptr::null(),           // lpThreadAttributes
-            0,                          // bInheritHandles = FALSE
+            inherit_handles,            // bInheritHandles
             flags,                      // dwCreationFlags
             env_block
                 .as_ref()

@@ -86,6 +86,14 @@ pub struct ContainerConfig {
     /// Tools to install in the rootfs (e.g., "node", "winget").
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Host system directories to share into the container as volume-GUID
+    /// junctions (read-write passthrough). Recognised: `windows`,
+    /// `programfiles`, `programfilesx86`, `programdata`, `windowsapps`.
+    /// Sharing `windows` makes the entire host `C:\Windows` visible inside
+    /// the container — fixes .NET SslStream and gives access to all
+    /// system DLLs without a fragile mirror list.
+    #[serde(default)]
+    pub shares: Vec<String>,
     /// Security profile.
     #[serde(default)]
     pub security_profile: SecurityProfile,
@@ -136,6 +144,21 @@ pub enum NetworkAccess {
     /// Allows: dev servers (vite, webpack-dev-server), API servers.
     /// Host can reach container services on localhost:<port>.
     Full,
+    /// **Experimental.** Userland netstack via the per-container daemon
+    /// (`psroot-netstack-host`) and injected `psroot-netshim`.
+    ///
+    /// Phase 1 (today): AppContainer capability set matches `Outbound` —
+    /// the daemon exists and can be exercised via its Rust API, but
+    /// automatic DLL injection into the container process is not wired
+    /// yet, so real container traffic still goes through the kernel TCP
+    /// stack. The flag is accepted so config files / CLI invocations
+    /// don't need to change when Phase 2 lands.
+    ///
+    /// Phase 2 (planned): Detours-based injection of `psroot-netshim`
+    /// causes every Winsock call inside the container to be proxied to
+    /// the daemon, giving the container a virtual per-container IP
+    /// without Hyper-V / WSL.
+    Netstack,
 }
 
 /// A published port mapping (Docker `-p` style).

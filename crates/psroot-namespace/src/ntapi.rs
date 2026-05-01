@@ -55,6 +55,19 @@ extern "system" {
         target_name: *const UNICODE_STRING,
     ) -> NTSTATUS;
 
+    fn NtOpenDirectoryObject(
+        directory_handle: *mut HANDLE,
+        desired_access: ACCESS_MASK,
+        object_attributes: *const OBJECT_ATTRIBUTES,
+    ) -> NTSTATUS;
+
+    fn NtSetInformationProcess(
+        process_handle: HANDLE,
+        process_information_class: u32,
+        process_information: PVOID,
+        process_information_length: ULONG,
+    ) -> NTSTATUS;
+
     fn NtClose(handle: HANDLE) -> NTSTATUS;
 }
 
@@ -154,4 +167,120 @@ pub fn create_symlink(
     }
 
     Ok(NtHandle(handle))
+}
+
+const DIRECTORY_QUERY: ACCESS_MASK = 0x0001;
+const DIRECTORY_TRAVERSE: ACCESS_MASK = 0x0002;
+
+/// Open an existing NT directory object (e.g. `\GLOBAL??`) for use as
+/// a shadow/parent.
+pub fn open_directory(name: &str) -> Result<NtHandle> {
+    let wide = to_wide(name);
+    let ustr = make_unicode_string(&wide);
+    let oa = make_object_attributes(&ustr, None, false);
+
+    let mut handle: HANDLE = 0;
+    let status = unsafe {
+        NtOpenDirectoryObject(&mut handle, DIRECTORY_QUERY | DIRECTORY_TRAVERSE, &oa)
+    };
+    if status != STATUS_SUCCESS {
+        return Err(PsrootError::nt("NtOpenDirectoryObject", status as u32));
+    }
+    Ok(NtHandle(handle))
+}
+
+/// Create an unnamed NT directory object that shadows another directory
+/// (lookups not satisfied locally fall through to the shadow). Used to
+/// build private DOS device maps that inherit the global one.
+pub fn create_directory_shadowed(shadow: HANDLE) -> Result<NtHandle> {
+    // Unnamed object: ObjectName == NULL. We still need a valid OA struct.
+    let oa = OBJECT_ATTRIBUTES {
+        length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as ULONG,
+        root_directory: 0,
+        object_name: ptr::null(),
+        attributes: OBJ_CASE_INSENSITIVE,
+        security_descriptor: ptr::null_mut(),
+        security_quality_of_service: ptr::null_mut(),
+    };
+
+    let mut handle: HANDLE = 0;
+    let status = unsafe {
+        NtCreateDirectoryObjectEx(&mut handle, DIRECTORY_ALL_ACCESS, &oa, shadow, 0)
+    };
+    if status != STATUS_SUCCESS {
+        return Err(PsrootError::nt("NtCreateDirectoryObjectEx(shadow)", status as u32));
+    }
+    Ok(NtHandle(handle))
+}
+
+/// Create a NAMED NT directory object that shadows another directory.
+/// `ObSetDeviceMap` requires named directories on Win10/11 client SKUs;
+/// unnamed shadowed directories are rejected with STATUS_INVALID_PARAMETER.
+pub fn create_directory_named_shadowed(name: &str, shadow: HANDLE) -> Result<NtHandle> {
+    let wide = to_wide(name);
+    let ustr = make_unicode_string(&wide);
+    // OPENIF so re-runs don't fail.
+    let oa = make_object_attributes(&ustr, None, true);
+
+    let mut handle: HANDLE = 0;
+    let status = unsafe {
+        NtCreateDirectoryObjectEx(&mut handle, DIRECTORY_ALL_ACCESS, &oa, shadow, 0)
+    };
+    if status != STATUS_SUCCESS && status != 0x40000000_u32 as i32 {
+        return Err(PsrootError::nt("NtCreateDirectoryObjectEx(named-shadow)", status as u32));
+    }
+    Ok(NtHandle(handle))
+}
+
+/// `PROCESS_DEVICEMAP_INFORMATION` — set form is a single HANDLE.
+const PROCESS_INFO_CLASS_DEVICE_MAP: u32 = 23;
+
+/// Assign the given directory handle as the target process's DOS device map.
+/// All `\??\` lookups in that process now resolve through `device_map_dir`.
+pub fn set_process_device_map(process: HANDLE, device_map_dir: HANDLE) -> Result<()> {
+    // PROCESS_DEVICEMAP_INFORMATION is a union of {HANDLE} (set, 8 bytes) and
+    // {ULONG DriveMap; UCHAR DriveType[32]} (query, 36 bytes). The kernel
+    // validates `Length == sizeof(union)` = 36 bytes regardless of operation.
+    #[repr(C)]
+    struct DeviceMapInfo {
+        handle_or_drivemap: usize, // 8 bytes — first 8 hold the handle on SET
+        drive_type: [u8; 32],      // padding for query form
+    }
+    let mut info = DeviceMapInfo {
+        handle_or_drivemap: device_map_dir as usize,
+        drive_type: [0u8; 32],
+    };
+
+    // Try the full 40-byte (8+32, padded to 40 for alignment) form first.
+    let len = std::mem::size_of::<DeviceMapInfo>() as ULONG;
+    let status = unsafe {
+        NtSetInformationProcess(
+            process,
+            PROCESS_INFO_CLASS_DEVICE_MAP,
+            &mut info as *mut _ as PVOID,
+            len,
+        )
+    };
+    if status == STATUS_SUCCESS {
+        return Ok(());
+    }
+
+    // Fallback: the legacy 8-byte SET-only form (just a HANDLE).
+    let mut just_handle: HANDLE = device_map_dir;
+    let status2 = unsafe {
+        NtSetInformationProcess(
+            process,
+            PROCESS_INFO_CLASS_DEVICE_MAP,
+            &mut just_handle as *mut HANDLE as PVOID,
+            std::mem::size_of::<HANDLE>() as ULONG,
+        )
+    };
+    if status2 == STATUS_SUCCESS {
+        return Ok(());
+    }
+
+    Err(PsrootError::Other(format!(
+        "NtSetInformationProcess(DeviceMap) [tried len={} -> 0x{:08x}, len=8 -> 0x{:08x}]",
+        len, status as u32, status2 as u32,
+    )))
 }
