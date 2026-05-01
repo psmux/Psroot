@@ -23,8 +23,11 @@ tmp*
 .vscode/
 *.swp
 *.swo
+*.log
 *~
 .idea/
+PRD/
+/PRD/
 
 # OS junk
 Thumbs.db
