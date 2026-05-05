@@ -1,3 +1,4 @@
+#![cfg(windows)]
 mod handle;
 mod limits;
 mod accounting;

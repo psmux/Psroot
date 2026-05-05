@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! Isolated Desktop for headful GUI process containment.
 //!
 //! Windows supports multiple Desktop objects within a single Window Station.

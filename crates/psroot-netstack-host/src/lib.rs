@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! Host-side netstack daemon for a psroot container.
 //!
 //! # Role

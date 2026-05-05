@@ -1,3 +1,4 @@
+#![cfg(windows)]
 pub mod app_stage;
 pub mod container;
 pub mod detect;

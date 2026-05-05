@@ -1,12 +1,19 @@
 <p align="center">
   <h1 align="center">Psroot</h1>
   <p align="center">
-    <strong>Docker-style containers for Windows — no VTx, no Hyper-V, no Docker, no WSL.</strong>
+    <strong>Docker-style containers for Windows, Linux, and macOS — no VTx, no Hyper-V, no Docker, no WSL.</strong>
   </p>
   <p align="center">
-    A single 2 MB binary. Pure Windows kernel primitives. Works on VMs, bare metal, and cloud instances<br>where nested virtualization is unavailable.
+    A single ~2 MB binary. Pure OS kernel primitives (AppContainer on Windows, namespaces+cgroups on Linux, sandbox-exec on macOS).<br>Works on VMs, bare metal, and cloud instances where nested virtualization is unavailable.
   </p>
 </p>
+
+> **Cross-platform status (May 2026)**
+>
+> The original Windows backend (`psroot-container`, AppContainer + Job Objects + Server Silo) is unchanged.
+> A new `psroot-unix` backend implements the same `Container` API for **Linux** (clone(2) namespaces + cgroups v2 + pivot_root) and **macOS** (sandbox-exec SBPL profiles + PTY + rlimits).
+> `psroot-cli` dispatches to the right backend automatically by `cfg`.
+> See [`PRD/`](PRD/) for the design and [`PRD/07-proof-log.md`](PRD/07-proof-log.md) for a captured macOS run.
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •

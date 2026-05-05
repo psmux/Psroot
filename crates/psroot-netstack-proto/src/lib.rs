@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! Wire protocol between `psroot-netshim` (injected in the container) and
 //! `psroot-netstack-host` (the runtime-side daemon).
 //!

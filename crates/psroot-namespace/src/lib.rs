@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! NT Object Namespace construction for Server Silos.
 //!
 //! Creates the directory objects and symbolic links that give a silo

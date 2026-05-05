@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! Bind Filter (CreateBindLink/RemoveBindLink) — filesystem redirection.
 //!
 //! Requires Windows 11 24H2+ (build 26100) and Administrator.

@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! psroot-rootfs-stager — apply a `LaunchPlan` to disk.
 //!
 //! Operations supported:

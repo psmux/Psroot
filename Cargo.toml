@@ -17,6 +17,7 @@ members = [
     "crates/psroot-cli",
     "crates/psroot-shell-resolver",
     "crates/psroot-rootfs-stager",
+    "crates/psroot-unix",
 ]
 
 [workspace.package]
