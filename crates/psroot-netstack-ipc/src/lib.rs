@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! Lock-free shared-memory IPC for the psroot netstack.
 //!
 //! Two processes — the AppContainer **shim** and the host **daemon** —

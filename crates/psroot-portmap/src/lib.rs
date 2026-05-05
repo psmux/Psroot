@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! Host-side TCP port mapper for psroot containers.
 //!
 //! # Why this exists

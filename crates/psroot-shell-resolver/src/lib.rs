@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! psroot-shell-resolver — pure-logic resolver that produces a concrete
 //! `LaunchPlan` describing how a host shell should be staged, ACL'd and spawned
 //! inside an AppContainer.

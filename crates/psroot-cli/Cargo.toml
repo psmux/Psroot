@@ -2,7 +2,7 @@
 name = "psroot-cli"
 version.workspace = true
 edition.workspace = true
-description = "Psroot CLI — Docker-style container management for Windows"
+description = "Psroot CLI — Docker-style containers (Windows + Linux + macOS)"
 
 [[bin]]
 name = "psroot"
@@ -10,13 +10,20 @@ path = "src/main.rs"
 
 [dependencies]
 psroot-types = { path = "../psroot-types" }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
 psroot-job = { path = "../psroot-job" }
 psroot-silo = { path = "../psroot-silo" }
 psroot-bindlink = { path = "../psroot-bindlink" }
 psroot-container = { path = "../psroot-container" }
 psroot-namespace = { path = "../psroot-namespace" }
 psroot-portmap = { path = "../psroot-portmap" }
-clap = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+psroot-unix = { path = "../psroot-unix" }
+nix = { version = "0.29", features = ["term", "process", "signal"] }
+libc = "0.2"

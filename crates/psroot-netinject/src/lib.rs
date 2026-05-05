@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! Minimal DLL injector for the psroot netshim.
 //!
 //! # Scope

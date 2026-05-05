@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! Server Silo — full namespace isolation for Windows.
 //!
 //! Combines a Job Object (for resource limits + kill-on-close) with

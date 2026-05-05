@@ -1,0 +1,148 @@
+# lima.psroot.yaml
+# Lima VM template that gives psroot a real Linux kernel on macOS.
+#
+# Usage:
+#   limactl create --name=psroot tools/mac/lima.psroot.yaml
+#   limactl start psroot
+#   limactl shell psroot
+#
+# After first boot the provision script installs Rust, debootstrap,
+# iptables, and other deps, builds psroot, and stages an Ubuntu noble
+# rootfs at /opt/psroot/rootfs. From then on `psroot run …` inside the
+# VM works exactly like the Linux end-to-end proof.
+
+# Apple Virtualization.framework — fastest, lightest, native arm64 on M-series Macs.
+vmType: vz
+
+# Ubuntu 24.04 LTS (noble), matching the Linux proof environment.
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+
+# Resources: deliberately tiny. Steady-state psroot + a sshd container
+# fits in ~150 MiB; we provision 512 MiB / 1 CPU and a 2 GiB swapfile
+# so the **first-boot** `cargo build --release -p psroot-cli` (which
+# briefly needs ~700 MiB peak in rustc/LLVM) still completes. After
+# the binary is built, the VM happily runs containers in 512 MiB.
+cpus: 1
+memory: "512MiB"
+disk: "10GiB"
+
+# Mount the host workspace so you edit on the Mac and build/run in the VM.
+mounts:
+  - location: "~/workspace/Psroot"
+    mountPoint: "/workspace/Psroot"
+    writable: true
+mountType: "virtiofs"
+
+# Forward common dev-server ports + the published-port range psroot uses
+# by convention. Add more under `portForwards:` as you publish ports.
+portForwards:
+  - guestPort: 2222
+    hostIP: "127.0.0.1"
+  - guestPort: 3000
+    hostIP: "127.0.0.1"
+  - guestPort: 8000
+    hostIP: "127.0.0.1"
+  - guestPort: 8080
+    hostIP: "127.0.0.1"
+  - guestPort: 8081
+    hostIP: "127.0.0.1"
+  - guestPortRange: [10000, 10100]
+    hostIP: "127.0.0.1"
+
+# Run as the lima user (uid 501) by default; psroot needs sudo for
+# CLONE_NEWNET + iptables, which the user has passwordless via cloud-init.
+containerd:
+  system: false
+  user: false
+
+# Provision: install everything psroot needs on first boot.
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        build-essential pkg-config libssl-dev ca-certificates curl git \
+        debootstrap iptables iproute2 iputils-ping \
+        gpgv gnupg uidmap
+      # 2 GiB swapfile so cargo build of psroot-cli (peak ~700 MiB in
+      # rustc/LLVM) succeeds in a 512 MiB VM. Idle cost: ~0.
+      if [ ! -f /swapfile ]; then
+        fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      fi
+      # Enable IP forwarding + route_localnet for the bridge/DNAT path.
+      cat >/etc/sysctl.d/99-psroot.conf <<EOF
+      net.ipv4.ip_forward=1
+      net.ipv4.conf.all.route_localnet=1
+      EOF
+      sysctl --system
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux
+      if ! command -v cargo >/dev/null; then
+        curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+      fi
+      source "$HOME/.cargo/env"
+      cd /workspace/Psroot
+      # Build into a VM-local target dir so the Mac's `cargo build` (which
+      # writes to the virtiofs-shared `target/`) does NOT overwrite the
+      # Linux binary with a Mach-O. After build, install to /usr/local/bin.
+      export CARGO_TARGET_DIR="$HOME/psroot-target"
+      cargo build --release -p psroot-cli
+      sudo install -m 0755 "$CARGO_TARGET_DIR/release/psroot" /usr/local/bin/psroot
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      if [ ! -d /opt/psroot/rootfs/usr ]; then
+        mkdir -p /opt/psroot
+        debootstrap --variant=minbase \
+          --include=openssh-server,ca-certificates,sudo,curl,iproute2,iputils-ping,gpgv,gnupg,libapt-pkg6.0t64 \
+          noble /opt/psroot/rootfs http://archive.ubuntu.com/ubuntu/
+        cat >/opt/psroot/rootfs/etc/apt/sources.list <<EOF
+      deb http://archive.ubuntu.com/ubuntu noble main universe
+      deb http://archive.ubuntu.com/ubuntu noble-updates main universe
+      deb http://security.ubuntu.com/ubuntu noble-security main universe
+      EOF
+        cat >/opt/psroot/rootfs/etc/apt/apt.conf.d/99gpgv <<EOF
+      APT::Key::gpgvcommand "/usr/bin/gpgv";
+      Dir::Bin::gpgv "/usr/bin/gpgv";
+      EOF
+        chown -R "$(id -u lima):$(id -g lima)" /opt/psroot
+      fi
+      # sshd in the rootfs needs /run/sshd to exist (privsep dir).
+      mkdir -p /opt/psroot/rootfs/run/sshd
+      chmod 0755 /opt/psroot/rootfs/run/sshd
+
+probes:
+  - description: "psroot binary built"
+    script: |
+      #!/bin/bash
+      set -eux
+      test -x /usr/local/bin/psroot
+    hint: |
+      psroot binary not built. Check `limactl shell psroot tail /var/log/cloud-init-output.log`.
+
+message: |
+  psroot Lima VM is ready.
+
+    limactl shell psroot                         # interactive shell in the VM
+    limactl shell psroot psroot run --rootfs /opt/psroot/rootfs --network outbound -- bash
+
+  Or use the Mac-side wrapper from the host:
+
+    tools/mac/psroot-mac run --rootfs /opt/psroot/rootfs --network outbound -- bash
+
+  Published ports (e.g. --publish 2222:22) are forwarded to 127.0.0.1
+  on this Mac. See lima.psroot.yaml `portForwards:` to add more.

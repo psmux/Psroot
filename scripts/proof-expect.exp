@@ -1,0 +1,15 @@
+set timeout 15
+log_user 1
+spawn ./target/release/psroot shell --network none
+expect -re "psroot> |\\$ |# |% " { }
+send "echo TTY=`tty` USER=\$USER ID=\$PSROOT_CONTAINER_ID MARKER_OK\r"
+expect {
+  -re "MARKER_OK" {
+    send "exit\r"
+    expect eof
+    puts "\n>>> INTERACTIVE PTY SHELL ROUNDTRIP CONFIRMED <<<"
+    exit 0
+  }
+  timeout { puts "TIMEOUT"; exit 1 }
+  eof     { puts "EOF (no marker)"; exit 1 }
+}

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# psroot-mac — DEPRECATED THIN SHIM.
+#
+# As of the macOS uniformity refactor, the `psroot` binary itself
+# transparently drives Lima on macOS. Users should just run `psroot ...`.
+# This script is retained as a forwarder so existing scripts/docs keep
+# working.
+exec "$(dirname "${BASH_SOURCE[0]}")/../../target/release/psroot" "$@"

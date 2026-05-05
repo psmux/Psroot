@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! Container-side shim for the psroot userland netstack.
 
 //!
