@@ -588,6 +588,7 @@ version = "0.1.0"
 dependencies = [
  "once_cell",
  "parking_lot",
+ "psroot-netinject",
  "tracing",
  "windows-sys 0.59.0",
 ]

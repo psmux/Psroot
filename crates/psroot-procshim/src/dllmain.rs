@@ -2,13 +2,22 @@
 //!
 //! When loaded into a target process (via `CreateRemoteThread(LoadLibraryW)`
 //! from `psroot-netinject`), Windows calls this `DllMain` on
-//! `DLL_PROCESS_ATTACH`. We keep work inside DllMain minimal to avoid
-//! loader-lock deadlocks — just `DisableThreadLibraryCalls` and spawning
-//! a dedicated init thread.
+//! `DLL_PROCESS_ATTACH`. 
 //!
-//! The init thread records the current PID as the container root and
-//! installs IAT hooks on all loaded modules to intercept ntdll process
-//! enumeration exports.
+//! Unlike the netshim (which defers to an init thread because it needs to
+//! open SHM handles — which may trigger DLL loads), the procshim's work
+//! is pure pointer writes (IAT patching + VirtualProtect). This is safe
+//! to do directly under the loader lock because:
+//!
+//! - `VirtualProtect` is an ntdll syscall (no DLL load)
+//! - Reading PE headers is just pointer arithmetic
+//! - `GetCurrentProcessId` is an ntdll call (always loaded)
+//! - `CreateToolhelp32Snapshot` is NOT called during install
+//! - No heap allocation beyond what the IAT walker does (Vec on our stack)
+//!
+//! By installing hooks synchronously in DllMain, we guarantee that by
+//! the time `LoadLibraryW` returns to the injector, the hooks are LIVE.
+//! The child process cannot race past us.
 
 #![cfg(windows)]
 
@@ -29,12 +38,11 @@ pub extern "system" fn DllMain(
         unsafe {
             DisableThreadLibraryCalls(inst);
         }
-        // Move real work off the loader-locked path.
-        let _ = std::thread::Builder::new()
-            .name("psroot-procshim-init".to_string())
-            .spawn(|| {
-                let _ = try_init();
-            });
+        // Install hooks SYNCHRONOUSLY under loader lock.
+        // This is safe because IAT patching is just pointer writes.
+        // By the time DllMain returns → LoadLibraryW returns → the
+        // injector resumes the main thread, hooks are guaranteed active.
+        let _ = try_init();
     }
     TRUE
 }

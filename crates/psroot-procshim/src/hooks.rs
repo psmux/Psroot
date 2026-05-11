@@ -144,9 +144,6 @@ unsafe fn build_allowed_pids(base: *mut u8, root_pid: u32) -> HashSet<u32> {
     // Build the allowed set: start with root, then iteratively add
     // any PID whose parent is already in the set. Repeat until stable.
     let mut allowed = HashSet::new();
-    // Always allow PID 0 (Idle) — expected system entry. Some tools
-    // crash if it's missing.
-    allowed.insert(0u32);
     allowed.insert(root_pid);
 
     // Iterative closure: keep adding children until no new PIDs found.
@@ -161,6 +158,11 @@ unsafe fn build_allowed_pids(base: *mut u8, root_pid: u32) -> HashSet<u32> {
             break;
         }
     }
+
+    // Always allow PID 0 (Idle) in the final display set — some tools
+    // crash if it's missing. But do NOT add it before the loop above,
+    // otherwise PID 4 (System, parent=0) and its entire subtree leak.
+    allowed.insert(0u32);
 
     allowed
 }

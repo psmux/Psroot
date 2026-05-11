@@ -495,14 +495,14 @@ impl Container {
 
     #[cfg(windows)]
     fn try_inject_procshim(&mut self, pid: u32) {
-        use crate::procshim_runtime::{default_procshim_path, inject_procshim};
+        use crate::procshim_runtime::{default_procshim_path, inject_procshim, stage_into_rootfs};
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION,
             PROCESS_VM_READ, PROCESS_VM_WRITE,
         };
 
-        let dll = match default_procshim_path() {
+        let source_dll = match default_procshim_path() {
             Some(p) => p,
             None => {
                 tracing::debug!(
@@ -510,6 +510,16 @@ impl Container {
                     "psroot_procshim.dll not found; host processes will be visible inside container"
                 );
                 return;
+            }
+        };
+
+        // Stage the DLL into the rootfs so the AppContainer process can
+        // actually load it (AppContainer can only read ACL'd paths).
+        let inject_path = match stage_into_rootfs(&source_dll, &self.config.rootfs_path) {
+            Some(p) => p,
+            None => {
+                // Fall back to the original path (works for non-AppContainer / silo mode)
+                source_dll.clone()
             }
         };
 
@@ -527,7 +537,7 @@ impl Container {
             );
             return;
         }
-        let result = unsafe { inject_procshim(handle, &dll) };
+        let result = unsafe { inject_procshim(handle, &inject_path) };
         unsafe { CloseHandle(handle); }
         match result {
             Ok(()) => {
