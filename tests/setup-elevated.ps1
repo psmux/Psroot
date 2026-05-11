@@ -1,6 +1,6 @@
 # Run this script in an ELEVATED pwsh to apply psroot's one-time ACE grants.
 # Right-click pwsh -> Run as Administrator, then:
-#   cd C:\Users\gj\Documents\workspace\Psroot
+#   cd <repo>\tests
 #   .\setup-elevated.ps1
 
 $ErrorActionPreference = 'Continue'  # don't bail on first error — log everything
@@ -20,7 +20,7 @@ if (-not $IsAdmin) {
     exit 1
 }
 
-$Repo = $PSScriptRoot
+$Repo = Split-Path $PSScriptRoot -Parent
 $Psroot = Join-Path $Repo 'target\release\psroot.exe'
 Log "Psroot binary: $Psroot"
 if (-not (Test-Path $Psroot)) {

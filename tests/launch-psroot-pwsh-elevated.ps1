@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 # launch-psroot-shell-elevated.ps1
 #
-#   Start-Process pwsh -Verb RunAs -ArgumentList '-NoExit','-File','C:\Users\gj\Documents\workspace\Psroot\launch-psroot-pwsh-elevated.ps1'
+#   Start-Process pwsh -Verb RunAs -ArgumentList '-NoExit','-File','<repo>\tests\launch-psroot-pwsh-elevated.ps1'
 #
 # Opens an elevated console, runs `psroot shell` with cmd.exe as the
 # entry shell (proven-working under AppContainer), and from that prompt
@@ -19,14 +19,15 @@
 
 $ErrorActionPreference = 'Continue'
 $Host.UI.RawUI.WindowTitle = 'PSROOT (elevated) -- interactive shell inside AppContainer'
-Set-Location 'C:\Users\gj\Documents\workspace\Psroot'
+$RepoRoot = Split-Path $PSScriptRoot -Parent
+Set-Location $RepoRoot
 
-$logPath = 'C:\Users\gj\Documents\workspace\Psroot\launch-psroot-pwsh.log'
+$logPath = Join-Path $RepoRoot 'launch-psroot-pwsh.log'
 # Write a heartbeat BEFORE Start-Transcript in case the transcript itself fails.
 "[heartbeat $(Get-Date -Format o)] launcher entered, PID=$PID" | Out-File -FilePath $logPath -Encoding utf8 -Force
 Start-Transcript -Path $logPath -Append | Out-Null
 
-$psroot = 'C:\Users\gj\Documents\workspace\Psroot\target\release\psroot.exe'
+$psroot = Join-Path $RepoRoot 'target\release\psroot.exe'
 
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = ([Security.Principal.WindowsPrincipal]$id).IsInRole(

@@ -22,11 +22,6 @@ path = "bin/procshim_testchild.rs"
 name = "procshim-e2e-test"
 path = "bin/procshim_e2e_test.rs"
 
-# Utility to inspect ntdll function prologues
-[[bin]]
-name = "inspect-ntdll"
-path = "bin/inspect_ntdll.rs"
-
 [dependencies]
 tracing.workspace = true
 psroot-netinject = { path = "../psroot-netinject" }
