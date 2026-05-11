@@ -1,9 +1,9 @@
 # Build output
 /target/
 
-# Test artifacts
-test-*
-test_*
+# Test artifacts (root-level only — tests/ folder is tracked)
+/test-*
+/test_*
 tmp*
 *.tmp
 
