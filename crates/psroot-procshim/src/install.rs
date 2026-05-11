@@ -1,59 +1,100 @@
-//! Hook installation: patches ntdll.dll imports across all loaded
-//! modules so that NtQuerySystemInformation and NtOpenProcess route
-//! through our filtering hooks.
+//! Hook installation via INLINE FUNCTION PATCHING.
 //!
-//! Unlike the netshim (which patches only ws2_32 in the main exe),
-//! we patch EVERY loaded module — especially `kernelbase.dll` and
-//! `kernel32.dll`, because high-level APIs like `CreateToolhelp32Snapshot`,
-//! `K32EnumProcesses`, etc. live there and call ntdll internally.
+//! IAT hooking doesn't work for ntdll functions because kernelbase and
+//! other system modules resolve them via direct syscall stubs, not
+//! through an IAT entry we can replace. The ONLY reliable way to
+//! intercept NtQuerySystemInformation for ALL callers is to patch the
+//! first bytes of the function itself with a `jmp` to our hook.
+//!
+//! Technique (x64): 
+//!   jmp qword ptr [rip+0]    ; FF 25 00 00 00 00   (6 bytes)
+//!   <absolute hook address>  ; 8 bytes
+//! Total: 14 bytes. Padded to 16 with 2x NOP (90 90).
+//!
+//! Windows ntdll syscall stubs are exactly:
+//!   mov r10, rcx      ; 3 bytes
+//!   mov eax, <num>    ; 5 bytes  
+//!   test byte [..], 1 ; 8 bytes  (ends at offset 16)
+//!   ...
+//! So 16 bytes gives us a clean instruction boundary.
+//!
+//! The trampoline saves the full 24-byte syscall stub and executes
+//! it to call the real function.
+//!
+//! # Loader lock safety
+//!
+//! This is safe under loader lock because:
+//! - `GetModuleHandleA` is loader-lock-safe
+//! - `GetProcAddress` is loader-lock-safe  
+//! - `VirtualProtect` / `VirtualAlloc` are direct syscalls
+//! - The actual patching is just memcpy
 
 #![cfg(windows)]
 
 use core::ffi::c_void;
+use core::sync::atomic::Ordering;
 
-use windows_sys::Win32::Foundation::HMODULE;
-use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W,
-    TH32CS_SNAPMODULE,
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+use windows_sys::Win32::System::Memory::{
+    VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE,
+    PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
 use crate::hooks::{hook_nt_open_process, hook_nt_query_system_information};
-use crate::iat::{patch_module, restore_module, HookEntry};
 use crate::state::{BypassGuard, ShimState, STATE};
+
+/// Size of an ntdll syscall stub on x64 Windows 10/11.
+const SYSCALL_STUB_SIZE: usize = 24;
+/// How many bytes we overwrite with our jump (14 + 2 NOP = 16).
+const PATCH_SIZE: usize = 16;
 
 #[derive(Debug)]
 pub enum InstallError {
     AlreadyInstalled,
-    NoImportsFound,
+    NtdllNotFound,
+    FunctionNotFound(&'static str),
+    PatchFailed(&'static str),
 }
 
-/// RAII guard: dropping reverts IAT patches in all modules.
+/// Executable trampoline that contains the original syscall stub.
+/// Calling this trampoline executes the real ntdll function.
+struct Trampoline {
+    code: *mut u8,
+}
+
+impl Trampoline {
+    fn as_fn_ptr(&self) -> *const c_void {
+        self.code as *const c_void
+    }
+}
+
+/// RAII guard: on drop, restores the original function bytes.
 pub struct HookGuard {
-    modules: Vec<HMODULE>,
+    patches: Vec<PatchRecord>,
+}
+
+struct PatchRecord {
+    target: *mut u8,
+    original_bytes: [u8; PATCH_SIZE],
+    #[allow(dead_code)]
+    trampoline: Trampoline,
 }
 
 impl Drop for HookGuard {
     fn drop(&mut self) {
-        let Some(state) = STATE.get() else { return };
-        let entries = build_entries(state);
-        for m in &self.modules {
-            unsafe {
-                restore_module(*m, b"ntdll.dll", &entries);
-            }
+        for p in &self.patches {
+            unsafe { restore_patch(p.target, &p.original_bytes); }
         }
     }
 }
 
-/// Install process-visibility hooks across all loaded modules.
+/// Install process-visibility hooks via inline patching of ntdll exports.
 ///
 /// # Safety
-/// IAT patching writes to executable memory. No other thread should be
-/// concurrently calling NtQuerySystemInformation or NtOpenProcess
-/// through the patched modules while this runs. In practice this is
-/// safe because we call this from a DllMain init thread before the
-/// target application has finished initializing.
+/// Modifies executable code in ntdll.dll. Must be called when no other
+/// thread is executing the target functions (e.g., from DllMain of an
+/// injected DLL into a suspended process).
 pub unsafe fn install() -> Result<HookGuard, InstallError> {
     if STATE.get().is_some() {
         return Err(InstallError::AlreadyInstalled);
@@ -62,130 +103,120 @@ pub unsafe fn install() -> Result<HookGuard, InstallError> {
     let root_pid = GetCurrentProcessId();
     let _ = STATE.set(ShimState::new(root_pid));
     let state = STATE.get().expect("just set");
-    let entries = build_entries(state);
 
     let _g = BypassGuard::enter();
 
-    // Enumerate all modules loaded in our process and patch each one's
-    // ntdll.dll imports.
-    let modules = enumerate_modules();
-    let mut patched_modules = Vec::new();
-    let mut total_hits = 0;
-
-    for module in &modules {
-        let hits = patch_module(*module, b"ntdll.dll", &entries);
-        if hits > 0 {
-            patched_modules.push(*module);
-            total_hits += hits;
-        }
+    let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr());
+    if ntdll.is_null() {
+        return Err(InstallError::NtdllNotFound);
     }
 
-    if total_hits == 0 {
-        // Fallback: try the main exe and well-known system DLLs directly.
-        let main = GetModuleHandleW(core::ptr::null());
-        let hits = patch_module(main, b"ntdll.dll", &entries);
-        if hits > 0 {
-            patched_modules.push(main);
-            total_hits += hits;
-        }
+    let mut patches = Vec::new();
 
-        // kernelbase.dll — this is where the real implementations live
-        // on modern Windows (kernel32 is mostly a forwarder).
-        let kernelbase = GetModuleHandleW(
-            wide_str("kernelbase.dll").as_ptr(),
-        );
-        if !kernelbase.is_null() {
-            let hits = patch_module(kernelbase, b"ntdll.dll", &entries);
-            if hits > 0 {
-                patched_modules.push(kernelbase);
-                total_hits += hits;
-            }
-        }
+    // Hook NtQuerySystemInformation
+    let nqsi = GetProcAddress(ntdll, b"NtQuerySystemInformation\0".as_ptr());
+    let Some(nqsi) = nqsi else {
+        return Err(InstallError::FunctionNotFound("NtQuerySystemInformation"));
+    };
+    let nqsi_ptr = nqsi as *mut u8;
+    let trampoline = apply_inline_hook(
+        nqsi_ptr,
+        hook_nt_query_system_information as *const u8,
+    ).ok_or(InstallError::PatchFailed("NtQuerySystemInformation"))?;
 
-        // kernel32.dll — for older APIs.
-        let kernel32 = GetModuleHandleW(
-            wide_str("kernel32.dll").as_ptr(),
-        );
-        if !kernel32.is_null() {
-            let hits = patch_module(kernel32, b"ntdll.dll", &entries);
-            if hits > 0 {
-                patched_modules.push(kernel32);
-                total_hits += hits;
-            }
-        }
-    }
-
-    if total_hits == 0 {
-        return Err(InstallError::NoImportsFound);
-    }
-
-    tracing::info!(
-        root_pid,
-        modules = patched_modules.len(),
-        hooks = total_hits,
-        "procshim: process visibility hooks installed"
+    state.originals.nt_query_system_information.store(
+        trampoline.as_fn_ptr() as usize,
+        Ordering::Release,
     );
+    let mut original_bytes = [0u8; PATCH_SIZE];
+    // We already saved these in the trampoline — grab from there
+    core::ptr::copy_nonoverlapping(trampoline.code, original_bytes.as_mut_ptr(), PATCH_SIZE);
+    patches.push(PatchRecord {
+        target: nqsi_ptr,
+        original_bytes,
+        trampoline,
+    });
 
-    Ok(HookGuard {
-        modules: patched_modules,
-    })
+    // Hook NtOpenProcess
+    let nop = GetProcAddress(ntdll, b"NtOpenProcess\0".as_ptr());
+    let Some(nop) = nop else {
+        return Err(InstallError::FunctionNotFound("NtOpenProcess"));
+    };
+    let nop_ptr = nop as *mut u8;
+    let trampoline = apply_inline_hook(
+        nop_ptr,
+        hook_nt_open_process as *const u8,
+    ).ok_or(InstallError::PatchFailed("NtOpenProcess"))?;
+
+    state.originals.nt_open_process.store(
+        trampoline.as_fn_ptr() as usize,
+        Ordering::Release,
+    );
+    let mut original_bytes = [0u8; PATCH_SIZE];
+    core::ptr::copy_nonoverlapping(trampoline.code, original_bytes.as_mut_ptr(), PATCH_SIZE);
+    patches.push(PatchRecord {
+        target: nop_ptr,
+        original_bytes,
+        trampoline,
+    });
+
+    Ok(HookGuard { patches })
 }
 
-fn build_entries(state: &'static ShimState) -> [HookEntry; 2] {
-    use core::sync::atomic::AtomicUsize;
-
-    fn as_slot(a: &AtomicUsize) -> *mut *const c_void {
-        a as *const AtomicUsize as *mut *const c_void
+/// Apply an inline hook: overwrite the first PATCH_SIZE bytes of `target`
+/// with a jump to `hook`. Returns a Trampoline that contains the entire
+/// original syscall stub (executable, so calling it invokes the real function).
+unsafe fn apply_inline_hook(target: *mut u8, hook: *const u8) -> Option<Trampoline> {
+    // Allocate executable memory for the trampoline.
+    // We copy the FULL syscall stub (24 bytes) so the trampoline is a
+    // complete, self-contained implementation of the original function.
+    let trampoline_mem = VirtualAlloc(
+        core::ptr::null(),
+        SYSCALL_STUB_SIZE,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE,
+    ) as *mut u8;
+    if trampoline_mem.is_null() {
+        return None;
     }
 
-    let o = &state.originals;
-    [
-        HookEntry {
-            name: b"NtQuerySystemInformation\0",
-            replacement: hook_nt_query_system_information as *const c_void,
-            original: as_slot(&o.nt_query_system_information),
-        },
-        HookEntry {
-            name: b"NtOpenProcess\0",
-            replacement: hook_nt_open_process as *const c_void,
-            original: as_slot(&o.nt_open_process),
-        },
-    ]
+    // Copy the entire original syscall stub into the trampoline
+    core::ptr::copy_nonoverlapping(target, trampoline_mem, SYSCALL_STUB_SIZE);
+
+    // Now overwrite target with our jump:
+    //   FF 25 00 00 00 00    jmp qword ptr [rip+0]
+    //   <8-byte addr>        absolute address of our hook
+    //   90 90                2x NOP padding to reach 16 bytes
+    let hook_addr = hook as u64;
+    let mut patch = [0x90u8; PATCH_SIZE]; // fill with NOP
+    patch[0] = 0xFF;
+    patch[1] = 0x25;
+    patch[2] = 0x00;
+    patch[3] = 0x00;
+    patch[4] = 0x00;
+    patch[5] = 0x00;
+    patch[6..14].copy_from_slice(&hook_addr.to_le_bytes());
+    // bytes 14, 15 are NOP (already set)
+
+    // Make target writable, apply patch, restore protection
+    let mut old_protect: PAGE_PROTECTION_FLAGS = 0;
+    if VirtualProtect(target as *const c_void, PATCH_SIZE, PAGE_EXECUTE_READWRITE, &mut old_protect) == 0 {
+        return None;
+    }
+    core::ptr::copy_nonoverlapping(patch.as_ptr(), target, PATCH_SIZE);
+    let mut discard: PAGE_PROTECTION_FLAGS = 0;
+    VirtualProtect(target as *const c_void, PATCH_SIZE, old_protect, &mut discard);
+
+    Some(Trampoline { code: trampoline_mem })
 }
 
-/// Enumerate all modules loaded in the current process using
-/// Toolhelp32. Returns module base addresses that can be passed to
-/// `patch_module`.
-fn enumerate_modules() -> Vec<HMODULE> {
-    let mut result = Vec::new();
-    let pid = unsafe { GetCurrentProcessId() };
-
-    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid) };
-    if snap == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return result;
+/// Restore the original bytes of a hooked function.
+unsafe fn restore_patch(target: *mut u8, original: &[u8; PATCH_SIZE]) {
+    let mut old_protect: PAGE_PROTECTION_FLAGS = 0;
+    if VirtualProtect(target as *const c_void, PATCH_SIZE, PAGE_EXECUTE_READWRITE, &mut old_protect) == 0 {
+        return;
     }
-
-    let mut entry: MODULEENTRY32W = unsafe { core::mem::zeroed() };
-    entry.dwSize = core::mem::size_of::<MODULEENTRY32W>() as u32;
-
-    if unsafe { Module32FirstW(snap, &mut entry) } != 0 {
-        result.push(entry.hModule);
-        while unsafe { Module32NextW(snap, &mut entry) } != 0 {
-            result.push(entry.hModule);
-        }
-    }
-
-    unsafe {
-        windows_sys::Win32::Foundation::CloseHandle(snap);
-    }
-
-    result
-}
-
-/// Convert a &str to a null-terminated wide string.
-fn wide_str(s: &str) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    let mut v: Vec<u16> = std::ffi::OsStr::new(s).encode_wide().collect();
-    v.push(0);
-    v
+    core::ptr::copy_nonoverlapping(original.as_ptr(), target, PATCH_SIZE);
+    let mut discard: PAGE_PROTECTION_FLAGS = 0;
+    VirtualProtect(target as *const c_void, PATCH_SIZE, old_protect, &mut discard);
 }

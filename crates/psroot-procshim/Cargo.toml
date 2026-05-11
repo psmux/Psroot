@@ -11,8 +11,25 @@ description = "Container-side shim: hides host processes from sandboxed programs
 # psroot-netinject (CreateRemoteThread + LoadLibraryW).
 crate-type = ["rlib", "cdylib"]
 
+# Test child binary: exercises all process enumeration methods inside
+# a sandbox to prove the procshim isolation is complete.
+[[bin]]
+name = "procshim-testchild"
+path = "bin/procshim_testchild.rs"
+
+# E2E integration test: spawns testchild suspended, injects DLL, proves isolation.
+[[bin]]
+name = "procshim-e2e-test"
+path = "bin/procshim_e2e_test.rs"
+
+# Utility to inspect ntdll function prologues
+[[bin]]
+name = "inspect-ntdll"
+path = "bin/inspect_ntdll.rs"
+
 [dependencies]
 tracing.workspace = true
+psroot-netinject = { path = "../psroot-netinject" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
@@ -22,6 +39,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    "Win32_System_Pipes",
     "Win32_System_SystemInformation",
     "Win32_System_WindowsProgramming",
     "Win32_System_SystemServices",
