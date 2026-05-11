@@ -12,6 +12,7 @@ members = [
     "crates/psroot-netstack-host",
     "crates/psroot-netshim",
     "crates/psroot-netinject",
+    "crates/psroot-procshim",
     "crates/psroot-container",
     "crates/psroot-desktop",
     "crates/psroot-cli",
