@@ -211,6 +211,10 @@ impl Container {
                 Some(&self.config.working_directory),
             )?;
 
+            // Inject process-visibility shim into silo's init process.
+            #[cfg(windows)]
+            self.try_inject_procshim(info.pid);
+
             info!(id = %self.id, pid = info.pid, silo_id = silo.silo_id(), "Container started (silo mode)");
             self.runtime.silo = Some(silo);
         } else {
@@ -250,6 +254,10 @@ impl Container {
                 // container still runs, it just uses OS networking.
                 self.try_inject_netstack(pid, ns);
             }
+
+            // Inject the process-visibility shim to hide host processes.
+            #[cfg(windows)]
+            self.try_inject_procshim(pid);
 
             info!(id = %self.id, pid, "Container started (job mode)");
             self.runtime.job = Some(job);
@@ -479,6 +487,59 @@ impl Container {
                     "Netstack DLL injection failed; dropping daemon"
                 );
                 // Dropping `ns` here shuts the daemon down cleanly.
+            }
+        }
+    }
+
+    // ──────────────── process-visibility shim injection ─────────────────
+
+    #[cfg(windows)]
+    fn try_inject_procshim(&mut self, pid: u32) {
+        use crate::procshim_runtime::{default_procshim_path, inject_procshim};
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION,
+            PROCESS_VM_READ, PROCESS_VM_WRITE,
+        };
+
+        let dll = match default_procshim_path() {
+            Some(p) => p,
+            None => {
+                tracing::debug!(
+                    id = %self.id,
+                    "psroot_procshim.dll not found; host processes will be visible inside container"
+                );
+                return;
+            }
+        };
+
+        let rights = PROCESS_CREATE_THREAD
+            | PROCESS_QUERY_INFORMATION
+            | PROCESS_VM_OPERATION
+            | PROCESS_VM_READ
+            | PROCESS_VM_WRITE;
+        let handle = unsafe { OpenProcess(rights, 0, pid) };
+        if handle.is_null() {
+            tracing::warn!(
+                id = %self.id,
+                pid,
+                "OpenProcess failed for procshim injection"
+            );
+            return;
+        }
+        let result = unsafe { inject_procshim(handle, &dll) };
+        unsafe { CloseHandle(handle); }
+        match result {
+            Ok(()) => {
+                info!(id = %self.id, pid, "Process-visibility shim injected — host processes hidden");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    id = %self.id,
+                    pid,
+                    error = ?e,
+                    "Procshim DLL injection failed; host processes will remain visible"
+                );
             }
         }
     }

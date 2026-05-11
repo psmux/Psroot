@@ -6,6 +6,8 @@ pub mod detect;
 pub mod netstack_runtime;
 #[cfg(windows)]
 pub mod peb_patch;
+#[cfg(windows)]
+pub mod procshim_runtime;
 pub mod rootfs;
 pub mod sandbox;
 #[cfg(windows)]

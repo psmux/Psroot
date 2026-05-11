@@ -583,6 +583,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "psroot-procshim"
+version = "0.1.0"
+dependencies = [
+ "once_cell",
+ "parking_lot",
+ "tracing",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "psroot-rootfs-stager"
 version = "0.1.0"
 dependencies = [
