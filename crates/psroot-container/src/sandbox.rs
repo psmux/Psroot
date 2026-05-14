@@ -364,19 +364,27 @@ fn add_loopback_exemption(profile_name: &str) -> Result<()> {
     match result {
         Ok(output) if output.status.success() => {
             tracing::debug!("Loopback exemption added");
-            Ok(())
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Non-fatal: container still works, just can't reach from host
-            tracing::warn!(%stderr, "CheckNetIsolation failed (loopback may not work from host)");
-            Ok(())
+            tracing::warn!(%stderr, "CheckNetIsolation -a failed (loopback may not work from host)");
         }
         Err(e) => {
             tracing::warn!(error = %e, "CheckNetIsolation.exe not found");
-            Ok(())
+            return Ok(());
         }
     }
+
+    // Also enable inbound: -is allows the AppContainer to RECEIVE
+    // connections from non-AC processes on the host (host browser →
+    // container dev server). Without this, sockets bound inside the AC
+    // listen but connect attempts from outside time out silently.
+    let _ = std::process::Command::new("CheckNetIsolation.exe")
+        .args(["LoopbackExempt", "-is", &format!("-n={}", profile_name)])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(())
 }
 
 /// Remove a loopback exemption for an AppContainer profile.
@@ -889,6 +897,18 @@ pub fn spawn_interactive(
     // 2. Grant the AppContainer SID access to the rootfs
     grant_appcontainer_access(&config.rootfs_path, ac_profile.sid())?;
 
+    // 2b. Grant access to user-supplied bind mounts so the AppContainer
+    // can read/write inside them (e.g. ContainerUser home dir mounted from
+    // the host). Without this the host directories are reachable via
+    // junction but writes fail with ERROR_ACCESS_DENIED.
+    for vm in &config.volumes {
+        if std::path::Path::new(&vm.host_path).exists() {
+            if let Err(e) = grant_appcontainer_access(&vm.host_path, ac_profile.sid()) {
+                tracing::warn!(host = %vm.host_path, error = %e, "bind ACL grant failed");
+            }
+        }
+    }
+
     // 3. Build network capabilities
     let (_cap_sids, cap_attrs) = build_network_capabilities(config.network)?;
     let cap_count = cap_attrs.len() as u32;
@@ -933,16 +953,12 @@ pub fn spawn_interactive(
     }
 
     // 6. Sanitize environment — hide host paths from the child process.
-    //    AppContainer can't accept a custom env block (error 203), so we
-    //    temporarily modify our own process env, spawn, then restore.
     let saved_env = apply_sandbox_env(config);
 
     // 7. Build command and cwd — start at rootfs root, not rootfs\Temp
     let mut cmd_wide: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
     let cwd = config.rootfs_path.clone();
     let cwd_wide: Vec<u16> = cwd.encode_utf16().chain(std::iter::once(0)).collect();
-
-    // 8. Create process — INTERACTIVE: no CREATE_NO_WINDOW, inherit handles
     let mut si_ex: StartupInfoExW = unsafe { std::mem::zeroed() };
     si_ex.startup_info.cb = std::mem::size_of::<StartupInfoExW>() as u32;
     si_ex.attribute_list = attr_list.as_mut_ptr();
