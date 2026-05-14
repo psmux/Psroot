@@ -299,6 +299,52 @@ impl Container {
 
     // ────────────────────────────── shell (interactive) ─────────────────
 
+    /// Set up host-side port mappings (proxies) without starting the full
+    /// container init lifecycle. Used by the legacy `--shell-binary` path
+    /// where we go straight from create() to shell() and need port
+    /// publishing to work.
+    ///
+    /// Allocates ephemeral ports if not already set, starts host TCP
+    /// proxies that forward to the container's listeners, and stores the
+    /// `PortMapper` so `stop()` can shut it down.
+    pub fn setup_port_mappings_for_shell(&mut self) -> Result<()> {
+        if self.config.ports.is_empty() || self.runtime.port_mapper.is_some() {
+            return Ok(());
+        }
+        for m in self.config.ports.iter_mut() {
+            if m.ephemeral_port.is_none() {
+                // For the legacy --shell-binary path the user-supplied
+                // container_port IS the port the in-AC service binds to
+                // (we pass it as `--port` directly), so forward to it
+                // instead of allocating an unrelated ephemeral.
+                m.ephemeral_port = Some(m.container_port);
+            }
+        }
+        let mapper = PortMapper::new();
+        for m in &self.config.ports {
+            mapper.add(m.clone()).map_err(|e| {
+                PsrootError::Other(format!(
+                    "publish {}:{} -> {}: {}",
+                    m.host_bind, m.host_port, m.container_port, e
+                ))
+            })?;
+        }
+        self.runtime.port_mapper = Some(mapper);
+        for (k, v) in psroot_portmap::env_for_mappings(&self.config.ports) {
+            self.config.env.insert(k, v);
+        }
+        Ok(())
+    }
+
+    /// Tear down host-side port mappings set up by
+    /// `setup_port_mappings_for_shell`. Safe to call when no mappings exist.
+    pub fn teardown_port_mappings(&mut self) {
+        if let Some(mapper) = self.runtime.port_mapper.take() {
+            mapper.shutdown();
+            drop(mapper);
+        }
+    }
+
     /// Launch an interactive shell inside the container's AppContainer sandbox.
     ///
     /// This blocks until the user exits the shell. The shell inherits the

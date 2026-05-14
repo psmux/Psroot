@@ -268,6 +268,7 @@ impl Drop for AppContainerProfile {
 
 const WIN_CAPABILITY_INTERNET_CLIENT: i32 = 86;
 const WIN_CAPABILITY_INTERNET_CLIENT_SERVER: i32 = 87;
+const WIN_CAPABILITY_PRIVATE_NETWORK_CLIENT_SERVER: i32 = 88;
 
 /// SE_GROUP_ENABLED — the capability is enabled in the token.
 const SE_GROUP_ENABLED: u32 = 0x00000004;
@@ -324,9 +325,12 @@ fn build_network_capabilities(
         NetworkAccess::Full => {
             // internetClientServer implies internetClient on Windows,
             // but we include both for explicitness and compatibility.
+            // privateNetworkClientServer is required for loopback inbound
+            // from non-AC processes (e.g. host browser → AC dev server).
             vec![
                 CapabilitySid::create(WIN_CAPABILITY_INTERNET_CLIENT)?,
                 CapabilitySid::create(WIN_CAPABILITY_INTERNET_CLIENT_SERVER)?,
+                CapabilitySid::create(WIN_CAPABILITY_PRIVATE_NETWORK_CLIENT_SERVER)?,
             ]
         }
         NetworkAccess::Netstack => {
@@ -375,20 +379,63 @@ fn add_loopback_exemption(profile_name: &str) -> Result<()> {
         }
     }
 
-    // Also enable inbound: -is allows the AppContainer to RECEIVE
-    // connections from non-AC processes on the host (host browser →
-    // container dev server). Without this, sockets bound inside the AC
-    // listen but connect attempts from outside time out silently.
-    let _ = std::process::Command::new("CheckNetIsolation.exe")
+    // Also enable inbound. `-is` is implemented as a long-running
+    // "Network Isolation Debug Session" that holds the inbound exemption
+    // open until it exits (Ctrl-C). We spawn it detached and intentionally
+    // do NOT wait — the child stays alive holding the exemption for as
+    // long as we (or the user) need it. Tracked in a global registry so
+    // `remove_loopback_exemption` can kill it during container teardown.
+    match std::process::Command::new("CheckNetIsolation.exe")
         .args(["LoopbackExempt", "-is", &format!("-n={}", profile_name)])
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::debug!(pid = child.id(), profile = %profile_name, "CheckNetIsolation -is session started");
+            register_inbound_session(profile_name, child);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "CheckNetIsolation -is spawn failed (inbound may not work)");
+        }
+    }
     Ok(())
+}
+
+/// Global registry of long-running `CheckNetIsolation -is` debug sessions
+/// keyed by AppContainer profile name. The child must stay alive for the
+/// inbound exemption to remain in effect.
+fn inbound_session_registry()
+    -> &'static std::sync::Mutex<std::collections::HashMap<String, std::process::Child>>
+{
+    static REG: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::process::Child>>,
+    > = std::sync::OnceLock::new();
+    REG.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn register_inbound_session(profile: &str, child: std::process::Child) {
+    if let Ok(mut map) = inbound_session_registry().lock() {
+        if let Some(mut prev) = map.insert(profile.to_string(), child) {
+            let _ = prev.kill();
+            let _ = prev.wait();
+        }
+    }
+}
+
+fn kill_inbound_session(profile: &str) {
+    if let Ok(mut map) = inbound_session_registry().lock() {
+        if let Some(mut child) = map.remove(profile) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// Remove a loopback exemption for an AppContainer profile.
 fn remove_loopback_exemption(profile_name: &str) {
+    kill_inbound_session(profile_name);
     let _ = std::process::Command::new("CheckNetIsolation.exe")
         .args(["LoopbackExempt", "-d", &format!("-n={}", profile_name)])
         .stdout(std::process::Stdio::null())

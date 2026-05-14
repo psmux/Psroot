@@ -551,7 +551,7 @@ fn cmd_shell(
             },
             ..default_config()
         };
-        let container = Container::create(config)?;
+        let mut container = Container::create(config)?;
         let id = container.id().to_string();
         let rootfs = container.config().rootfs_path.clone();
 
@@ -614,7 +614,11 @@ fn cmd_shell(
         }
 
         print_shell_banner(&id, container.config(), &network);
+        if let Err(e) = container.setup_port_mappings_for_shell() {
+            eprintln!("⚠ port mapping setup failed: {} (continuing without --publish forwarding)", e);
+        }
         let exit_code = container.shell(&command_line)?;
+        container.teardown_port_mappings();
         eprintln!("\nShell exited (code {}). Cleaning up...", exit_code);
         container.remove(false)?;
         eprintln!("Container {} removed.", id);
