@@ -515,13 +515,34 @@ fn cmd_shell(
     let memory_bytes = parse_memory(&memory)?;
     let ports = parse_ports(&publish)?;
 
-    // Legacy path: --shell-binary still works exactly as before.
-    if let Some(legacy) = shell_binary {
+    // Legacy path: --shell-binary now honours --shell-arg, --shell-env,
+    // --bind, --share. Volume mounts use junction fallback when bind
+    // filter (admin) is unavailable so non-admin AppContainer can still
+    // expose host directories at fixed container paths.
+    if let Some(legacy) = shell_binary.clone() {
+        // Parse --bind for legacy path too.
+        let mut legacy_volumes: Vec<psroot_types::config::VolumeMount> = Vec::new();
+        for spec in &bind {
+            let parsed = parse_bind_spec(spec).map_err(|e| {
+                psroot_types::error::PsrootError::Other(format!("--bind '{}': {}", spec, e))
+            })?;
+            legacy_volumes.push(parsed);
+        }
+        // Parse --shell-env into config.env (apply_sandbox_env honours these as overrides).
+        let mut legacy_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for e in &shell_env {
+            if let Some((k, v)) = e.split_once('=') {
+                legacy_env.insert(k.to_string(), v.to_string());
+            }
+        }
         let config = ContainerConfig {
             command: vec![legacy.clone()],
-            tools,
+            tools: tools.clone(),
+            shares: share.clone(),
             network: network_access,
-            ports,
+            ports: ports.clone(),
+            volumes: legacy_volumes.clone(),
+            env: legacy_env,
             resources: ResourceLimits {
                 memory: memory_bytes,
                 cpu_rate: cpu,
@@ -532,8 +553,68 @@ fn cmd_shell(
         };
         let container = Container::create(config)?;
         let id = container.id().to_string();
+        let rootfs = container.config().rootfs_path.clone();
+
+        // Junction-based bind fallback for non-admin (no BindFilter).
+        // Container::setup_bind_links only works with admin; when it's
+        // skipped we create the mounts as junctions inside the rootfs so
+        // host paths are still reachable from the AppContainer.
+        let caps = Capabilities::detect();
+        if !caps.bind_filter {
+            for vm in &legacy_volumes {
+                let cp = vm.container_path.trim();
+                let suffix = if cp.len() >= 2 && cp.as_bytes()[1] == b':' {
+                    &cp[2..]
+                } else {
+                    cp
+                };
+                let suffix = suffix.trim_start_matches('\\').trim_start_matches('/');
+                let junction_path = std::path::Path::new(&rootfs).join(suffix);
+                if let Some(parent) = junction_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                // If a directory already exists at the junction location
+                // (e.g. rootfs pre-created Users\ContainerUser), remove it
+                // so the junction can be created.
+                if junction_path.exists() {
+                    let _ = std::fs::remove_dir_all(&junction_path);
+                }
+                if let Err(e) = psroot_container::sandbox::create_volume_guid_junction(
+                    &junction_path,
+                    &vm.host_path,
+                ) {
+                    eprintln!(
+                        "⚠ bind {} -> {} failed: {} (continuing without junction)",
+                        vm.host_path, vm.container_path, e
+                    );
+                }
+            }
+        }
+
+        // Build properly-quoted command line: legacy + shell_arg.
+        let mut command_line = quote_arg_for_cmdline(&legacy);
+        for a in &shell_arg {
+            command_line.push(' ');
+            command_line.push_str(&quote_arg_for_cmdline(a));
+        }
+
+        if explain {
+            eprintln!("--explain (legacy --shell-binary path):");
+            eprintln!("  exe       : {}", legacy);
+            eprintln!("  args      : {:?}", shell_arg);
+            eprintln!("  cmdline   : {}", command_line);
+            eprintln!("  rootfs    : {}", rootfs);
+            eprintln!("  shares    : {:?}", share);
+            eprintln!("  binds     : {:?}", bind);
+            eprintln!("  shell-env : {:?}", shell_env);
+            eprintln!("  network   : {}", network);
+            eprintln!("  ports     : {:?}", publish);
+            container.remove(false)?;
+            return Ok(());
+        }
+
         print_shell_banner(&id, container.config(), &network);
-        let exit_code = container.shell(&legacy)?;
+        let exit_code = container.shell(&command_line)?;
         eprintln!("\nShell exited (code {}). Cleaning up...", exit_code);
         container.remove(false)?;
         eprintln!("Container {} removed.", id);
@@ -2917,6 +2998,36 @@ fn parse_bind_spec(s: &str) -> Result<VolumeMount, String> {
         container_path: container.to_string(),
         read_only,
     })
+}
+
+/// Quote a single argument per the standard CommandLineToArgvW rules so it
+/// round-trips through CreateProcessW's lpCommandLine. Used by the legacy
+/// --shell-binary path to forward --shell-arg values verbatim.
+fn quote_arg_for_cmdline(s: &str) -> String {
+    let needs_quote = s.is_empty()
+        || s.chars().any(|c| c == ' ' || c == '\t' || c == '"' || c == '\n');
+    if !needs_quote {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut backslashes: usize = 0;
+    for ch in s.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+        } else if ch == '"' {
+            for _ in 0..(backslashes * 2 + 1) { out.push('\\'); }
+            backslashes = 0;
+            out.push('"');
+        } else {
+            for _ in 0..backslashes { out.push('\\'); }
+            backslashes = 0;
+            out.push(ch);
+        }
+    }
+    for _ in 0..(backslashes * 2) { out.push('\\'); }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
